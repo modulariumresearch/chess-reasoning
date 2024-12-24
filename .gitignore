@@ -1,0 +1,19 @@
+# Model files
+*.model
+*.weights
+*.h5
+*.pt
+*.pth
+*.ckpt
+model/
+models/
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
