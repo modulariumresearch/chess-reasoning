@@ -5,35 +5,56 @@ import sys
 import pygame
 import chess
 import torch
+import random
 
 from chess_model import ChessAgent, HierarchicalChessAgent
-# Import the reasoning agent
-from reasoning.reasoning_agent import ReasoningChessAgent
 
 pygame.init()
 
-WINDOW_SIZE = 800
-BOARD_SIZE = 600
-SQUARE_SIZE = BOARD_SIZE // 8
+# Overall window size
+WINDOW_WIDTH = 1080
+WINDOW_HEIGHT = 800
+
+# Board layout constants
+BOARD_WIDTH = 700   # ~65% of the app width
+BOARD_HEIGHT = 700  # We'll keep the board square
+SQUARE_SIZE = BOARD_HEIGHT // 8
+
+# Right panel (for chain-of-thought and status)
+RIGHT_PANEL_X = BOARD_WIDTH
+RIGHT_PANEL_WIDTH = WINDOW_WIDTH - BOARD_WIDTH
+RIGHT_PANEL_HEIGHT = WINDOW_HEIGHT
+
 FPS = 60
 
-WHITE = (255, 255, 255)
-BLACK = (0, 0, 0)
-DARK_SQUARE = (181, 136, 99)
-LIGHT_SQUARE = (240, 217, 181)
-HIGHLIGHT = (130, 151, 105)
-POSSIBLE_MOVE = (119, 149, 86)
+# Color palette (pastel / modern)
+BACKGROUND_COLOR = (245, 239, 235)       # Overall background
+BOARD_BORDER_COLOR = (234, 220, 202)
+LIGHT_SQUARE = (252, 244, 237)
+DARK_SQUARE = (232, 216, 202)
+HIGHLIGHT = (239, 132, 123)
+POSSIBLE_MOVE = (245, 207, 189)
+
+RIGHT_PANEL_BG = (250, 245, 240)         # Soft pastel for the right panel
+TEXT_COLOR = (60, 60, 60)                # Darker text
+STATUS_BG_COLOR = (230, 230, 230)
+
+FONT_NAME = None  # or "Avenir", "Helvetica", etc.
 
 class ChessGUI:
-    def __init__(self, use_hierarchical=False, use_reasoning=False, use_gpt=True):
+    def __init__(self, use_hierarchical=False):
         """
         :param use_hierarchical: If True, use HierarchicalChessAgent
-        :param use_reasoning: If True, use ReasoningChessAgent
-        :param use_gpt: If True, ReasoningChessAgent uses GPT
         """
-        self.screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
-        pygame.display.set_caption("Chess ML")
-        
+        # Create the screen
+        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        pygame.display.set_caption("Chess ML - Split Panel UI")
+
+        # Fonts
+        self.font = pygame.font.SysFont(FONT_NAME, 26, bold=False)
+        self.font_small = pygame.font.SysFont(FONT_NAME, 20)
+
+        # Prepare piece images
         self.pieces = {}
         piece_chars = ['P', 'N', 'B', 'R', 'Q', 'K']
         for color in ['w', 'b']:
@@ -45,13 +66,14 @@ class ChessGUI:
                         img, (SQUARE_SIZE, SQUARE_SIZE)
                     )
                 except:
-                    print(f"Warning: Could not load {path}")
+                    # fallback if image not found
                     surf = pygame.Surface((SQUARE_SIZE, SQUARE_SIZE), pygame.SRCALPHA)
                     pygame.draw.circle(surf, (255, 0, 0),
                                        (SQUARE_SIZE//2, SQUARE_SIZE//2),
                                        SQUARE_SIZE//3)
                     self.pieces[f'{color}{piece}'] = surf
-        
+
+        # Chess board
         self.board = chess.Board()
         self.selected_piece = None
         self.dragging = False
@@ -60,10 +82,7 @@ class ChessGUI:
         self.legal_moves = set()
 
         # Decide which agent to use
-        if use_reasoning:
-            print("Using ReasoningChessAgent with GPT =", use_gpt)
-            self.agent = ReasoningChessAgent(use_gpt=use_gpt)
-        elif use_hierarchical:
+        if use_hierarchical:
             print("Using HierarchicalChessAgent ...")
             self.agent = HierarchicalChessAgent()
         else:
@@ -72,105 +91,156 @@ class ChessGUI:
 
         # Attempt to load model
         try:
-            checkpoint = torch.load('models/chess_model.pt')
+            print("Loading chess model...")
+            checkpoint = torch.load('models/chess_model_final.pt', weights_only=True)  # Add weights_only=True
+            
             if 'model_state_dict' in checkpoint:
-                self.agent.model.load_state_dict(checkpoint['model_state_dict'])
+                # Get the current model state dict
+                model_state = self.agent.model.state_dict()
+                
+                # Update only the keys that exist in both dictionaries
+                for key in checkpoint['model_state_dict']:
+                    if key in model_state:
+                        model_state[key] = checkpoint['model_state_dict'][key]
+                
+                # Load the partial state dict
+                self.agent.model.load_state_dict(model_state, strict=False)
             else:
-                self.agent.model.load_state_dict(checkpoint)
+                # If it's just the state dict directly
+                model_state = self.agent.model.state_dict()
+                for key in checkpoint:
+                    if key in model_state:
+                        model_state[key] = checkpoint[key]
+                self.agent.model.load_state_dict(model_state, strict=False)
+            
             self.agent.model.eval()
             print("Loaded chess model successfully!")
+            
         except Exception as e:
             print(f"Error loading model: {e}")
-            print("Using untrained model.")
-        
+            print("Using untrained model. The AI will play with basic rules only.")
+
         self.status = "Your turn (White)"
-        self.font = pygame.font.Font(None, 36)
         self.clock = pygame.time.Clock()
 
         # We'll store the chain-of-thought text here
         self.last_chain_of_thought = ""
 
     def get_square_from_pos(self, pos):
+        """Convert mouse coords to board square (file/rank)."""
         x, y = pos
-        board_offset = (WINDOW_SIZE - BOARD_SIZE) // 2
-        if not (board_offset <= x < board_offset + BOARD_SIZE and 
-                board_offset <= y < board_offset + BOARD_SIZE):
+        # Only valid if within the board area (left panel)
+        if not (0 <= x < BOARD_WIDTH and 0 <= y < BOARD_HEIGHT):
             return None
-        file = (x - board_offset) // SQUARE_SIZE
-        rank = 7 - (y - board_offset) // SQUARE_SIZE
+        file = x // SQUARE_SIZE
+        rank = 7 - (y // SQUARE_SIZE)
         return chess.square(file, rank)
     
     def get_screen_pos(self, square):
+        """Convert board square to x,y coordinates in the left panel."""
         file = chess.square_file(square)
         rank = chess.square_rank(square)
-        board_offset = (WINDOW_SIZE - BOARD_SIZE) // 2
-        x = board_offset + file * SQUARE_SIZE
-        y = board_offset + (7 - rank) * SQUARE_SIZE
+        x = file * SQUARE_SIZE
+        y = (7 - rank) * SQUARE_SIZE
         return (x, y)
     
     def draw_board(self):
-        self.screen.fill(BLACK)
-        board_offset = (WINDOW_SIZE - BOARD_SIZE) // 2
+        """
+        Draw the left panel (board) plus the right panel (reasoning).
+        """
+        # Fill overall background
+        self.screen.fill(BACKGROUND_COLOR)
+
+        # -- Left Panel: Board area --
+        # Draw a border for the board
+        border_rect = pygame.Rect(0, 0, BOARD_WIDTH, BOARD_HEIGHT)
+        pygame.draw.rect(self.screen, BOARD_BORDER_COLOR, border_rect)
+
+        # Draw the squares
         for rank in range(8):
             for file in range(8):
                 color = LIGHT_SQUARE if (rank + file) % 2 == 0 else DARK_SQUARE
                 square = chess.square(file, rank)
-                x = board_offset + file * SQUARE_SIZE
-                y = board_offset + (7 - rank) * SQUARE_SIZE
-                pygame.draw.rect(self.screen, color, (x, y, SQUARE_SIZE, SQUARE_SIZE))
-                
+                x = file * SQUARE_SIZE
+                y = (7 - rank) * SQUARE_SIZE
+                rect = (x, y, SQUARE_SIZE, SQUARE_SIZE)
+                pygame.draw.rect(self.screen, color, rect)
+
+                # highlight selected or possible moves
                 if self.selected_piece == square:
-                    pygame.draw.rect(self.screen, HIGHLIGHT, (x, y, SQUARE_SIZE, SQUARE_SIZE))
+                    pygame.draw.rect(self.screen, HIGHLIGHT, rect, width=4)
                 elif square in self.legal_moves:
-                    pygame.draw.rect(self.screen, POSSIBLE_MOVE, (x, y, SQUARE_SIZE, SQUARE_SIZE))
-        
+                    pygame.draw.rect(self.screen, POSSIBLE_MOVE, rect)
+
         # Draw pieces
-        for square in chess.SQUARES:
-            piece = self.board.piece_at(square)
-            if piece and square != self.drag_piece:
-                x, y = self.get_screen_pos(square)
+        for sq in chess.SQUARES:
+            piece = self.board.piece_at(sq)
+            if piece and sq != self.drag_piece:
+                sx, sy = self.get_screen_pos(sq)
                 piece_key = ('w' if piece.color else 'b') + piece.symbol().upper()
-                self.screen.blit(self.pieces[piece_key], (x, y))
-        
+                self.screen.blit(self.pieces[piece_key], (sx, sy))
+
         # If dragging a piece
         if self.dragging and self.drag_piece is not None:
             piece = self.board.piece_at(self.drag_piece)
             if piece:
                 piece_key = ('w' if piece.color else 'b') + piece.symbol().upper()
-                x, y = self.drag_pos
-                x -= SQUARE_SIZE // 2
-                y -= SQUARE_SIZE // 2
-                self.screen.blit(self.pieces[piece_key], (x, y))
-        
-        # Render the status text
-        status_text = self.font.render(self.status, True, WHITE)
-        text_rect = status_text.get_rect(center=(WINDOW_SIZE//2, WINDOW_SIZE - 30))
-        self.screen.blit(status_text, text_rect)
+                mx, my = self.drag_pos
+                mx -= SQUARE_SIZE // 2
+                my -= SQUARE_SIZE // 2
+                self.screen.blit(self.pieces[piece_key], (mx, my))
 
-        # Render the chain-of-thought text above the status
-        # We can do multi-line by splitting on newline
+        # -- Right Panel --
+        right_rect = pygame.Rect(RIGHT_PANEL_X, 0, RIGHT_PANEL_WIDTH, RIGHT_PANEL_HEIGHT)
+        pygame.draw.rect(self.screen, RIGHT_PANEL_BG, right_rect)
+
+        # Title / header text
+        title_text = self.font.render("AI Reasoning", True, TEXT_COLOR)
+        self.screen.blit(title_text, (RIGHT_PANEL_X + 20, 20))
+
+        # Status text at the top of the right panel
+        status_surf = self.font.render(f"Status: {self.status}", True, TEXT_COLOR)
+        self.screen.blit(status_surf, (RIGHT_PANEL_X + 20, 60))
+
+        # Draw the chain-of-thought below the status
+        # Multi-line approach
+        y_offset = 100
         lines = self.last_chain_of_thought.split('\n')
-        # We'll render each line above the status text
-        y_offset = WINDOW_SIZE - 70  # Slightly above the status line
-        for line in lines[::-1]:  # go from last line to first, so it shows from bottom up
-            line_surface = self.font.render(line, True, WHITE)
-            line_rect = line_surface.get_rect(midbottom=(WINDOW_SIZE // 2, y_offset))
-            self.screen.blit(line_surface, line_rect)
-            y_offset -= 25  # move up for the next line
+        for line in lines:
+            line_surf = self.font_small.render(line, True, TEXT_COLOR)
+            self.screen.blit(line_surf, (RIGHT_PANEL_X + 20, y_offset))
+            y_offset += 24
 
     def make_ai_move(self):
-        ai_move = self.agent.select_move(self.board, temperature=0.1)
-        if ai_move:
-            # Retrieve the chain-of-thought from the agent
-            self.last_chain_of_thought = self.agent.last_explanation
+        """Make the AI's move, ensuring the chosen move is legal before using board.san(move)."""
+        if not self.board.is_game_over():
+            move = self.agent.select_move(self.board, temperature=0.1)
 
-            self.board.push(ai_move)
-            self.check_game_end()
-            if not self.board.is_game_over():
-                self.status = "Your turn (White)"
+            # Check if the move is legal
+            if move is not None and move in self.board.legal_moves:
+                self.board.push(move)
+                self.status = f"AI moved {self.board.san(move)}"
+                self.last_chain_of_thought = f"AI chose move: {self.board.san(move)}"
+                self.check_game_end()
+
+                # If the game isn't over after the AI's move, it's White's turn again
+                if not self.board.is_game_over():
+                    self.status = "Your turn (White)"
+            else:
+                # AI either returned None or an illegal move, so handle gracefully
+                print("AI tried an illegal move or returned None!")
+                
+                # Fallback: choose a random legal move (or do nothing, if you prefer)
+                legal_moves_list = list(self.board.legal_moves)
+                if legal_moves_list:
+                    fallback = random.choice(legal_moves_list)
+                    self.board.push(fallback)
+                    self.status = f"AI fallback to {self.board.san(fallback)}"
+        
+        # Clear selection state
         self.selected_piece = None
         self.legal_moves.clear()
-    
+
     def check_game_end(self):
         if self.board.is_game_over():
             if self.board.is_checkmate():
@@ -219,7 +289,7 @@ class ChessGUI:
                 elif event.type == pygame.MOUSEMOTION and self.dragging:
                     self.drag_pos = event.pos
                 elif event.type == pygame.KEYDOWN:
-                    # Press 'n' to reset the board
+                    # Press 'n' to reset
                     if event.key == pygame.K_n:
                         self.board = chess.Board()
                         self.status = "Your turn (White)"
@@ -234,8 +304,8 @@ class ChessGUI:
         pygame.quit()
 
 def main():
-    print("Starting Chess GUI with reasoning agent (GPT) ...")
-    gui = ChessGUI(use_hierarchical=False, use_reasoning=True, use_gpt=True)
+    print("Starting Chess GUI with standard ChessAgent ...")
+    gui = ChessGUI(use_hierarchical=False)
     gui.run()
 
 if __name__ == "__main__":

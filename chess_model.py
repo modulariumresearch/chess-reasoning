@@ -15,6 +15,10 @@ from dataclasses import dataclass
 from collections import defaultdict
 import random
 
+from reward_calculator import RewardCalculator
+from curriculum import DynamicCurriculumConfig
+from position_evaluator import PositionEvaluator
+
 ############################
 # Opening Book and Principles
 ############################
@@ -100,6 +104,56 @@ class OpeningPrinciples:
         return score
 
 ############################
+# Add the new strategic reasoning components
+############################
+
+class StrategicAttention(nn.Module):
+    """Multi-head attention module for chess strategic concepts."""
+    def __init__(self, hidden_dim, num_heads=8):
+        super().__init__()
+        assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        
+        self.attention = nn.MultiheadAttention(hidden_dim, num_heads)
+        self.concepts = nn.Parameter(torch.randn(32, hidden_dim))
+        
+        # For example, 8 or more conceptual descriptions:
+        self.concept_descriptions = {
+            0: "King safety and pawn shield structure",
+            1: "Center control and piece mobility",
+            2: "Pawn structure and weaknesses",
+            3: "Development and piece coordination",
+            4: "Material balance and compensation",
+            5: "Attack potential and piece activity",
+            6: "Control of key squares and outposts",
+            7: "Defensive resources and counterplay",
+        }
+        
+    def forward(self, x):
+        # x shape: (batch_size, sequence_length, hidden_dim)
+        batch_size = x.size(0)
+        x = x.transpose(0, 1)  # -> (seq_len, batch, hidden_dim)
+        
+        # Expand concepts for batch
+        concepts_expanded = self.concepts.unsqueeze(1).expand(-1, batch_size, -1)
+        
+        # Apply attention
+        attn_output, attn_weights = self.attention(
+            query=x,
+            key=concepts_expanded,
+            value=concepts_expanded
+        )
+        
+        # Reshape output back
+        attn_output = attn_output.transpose(0, 1)  # -> (batch, seq_len, hidden_dim)
+        concept_scores = attn_weights.mean(dim=1)  # -> (batch, seq_len_of_query, #concepts=32) if not careful
+        # But typically we just treat concept_scores as (batch, heads, seq_len, concept_count).
+        # For simplicity we'll keep it as is, or reduce further if needed.
+        
+        return attn_output, concept_scores.mean(dim=1)  # shape (batch, 32)
+
+############################
 # Basic Reward Calculation
 ############################
 
@@ -114,7 +168,6 @@ def calculate_reward(board: chess.Board, move: chess.Move) -> float:
             piece_values = {'P': 0.1, 'N': 0.3, 'B': 0.3, 'R': 0.5, 'Q': 0.9, 'K': 2.0}
             reward += piece_values.get(captured_piece.symbol().upper(), 0)
     
-    # Position rewards
     next_board = board.copy()
     next_board.push(move)
     
@@ -137,7 +190,6 @@ def calculate_reward(board: chess.Board, move: chess.Move) -> float:
     if board.fullmove_number <= 10:
         piece = board.piece_at(move.from_square)
         if piece and piece.piece_type in [chess.KNIGHT, chess.BISHOP]:
-            # If moving from back rank to a more advanced rank
             from_rank = chess.square_rank(move.from_square)
             if from_rank in [0, 1, 6, 7]:
                 to_rank = chess.square_rank(move.to_square)
@@ -237,33 +289,40 @@ class SearchStats:
 
 class ImprovedMCTSConfig:
     def __init__(self):
-        self.num_simulations = 50   # Reduced from 150 for speed
-        self.c_puct = 2.0
+        # Recommendation #4: More simulations, higher c_puct, updated temperature schedule
+        self.num_simulations = 200    # from 50
+        self.c_puct = 3.0             # from 2.0
         self.dirichlet_alpha = 0.3
         self.dirichlet_epsilon = 0.25
+        
         self.temperature_schedule = {
-            'opening': (0, 15, 1.0),    
-            'midgame': (16, 30, 0.5),   
-            'endgame': (31, float('inf'), 0.1)
+            'opening': (0, 10, 1.0),      # More exploration early
+            'midgame': (11, 20, 0.5),
+            'endgame': (21, float('inf'), 0.2)
         }
 
 class ImprovedTrainingConfig:
     def __init__(self):
-        self.num_iterations = 10
-        self.games_per_iteration = 4
-        self.batch_size = 32
-        self.num_epochs_per_iteration = 4
-        self.max_moves = 50
-        
-        self.learning_rate = 0.0005
-        self.weight_decay = 0.001
-        self.gradient_clip = 0.5
-        self.value_loss_weight = 1.0
-        self.policy_loss_weight = 2.0
-        self.entropy_weight = 0.05
-        
+        # Increased iterations and games per iteration (recommendation #1)
+        self.num_iterations = 50           # from 10
+        self.games_per_iteration = 16      # from 4
+        self.batch_size = 64               # from 32
+        self.num_epochs_per_iteration = 8  # from 4
+
+        # Adjusted learning parameters (recommendation #2)
+        self.learning_rate = 0.001   # from 0.0005
+        self.weight_decay = 0.0005   # from 0.001
+        self.gradient_clip = 1.0     # from 0.5
+
+        # Better loss balancing (recommendation #7)
+        self.value_loss_weight = 1.5  # from 1.0
+        self.policy_loss_weight = 1.0 # from 2.0
+        self.entropy_weight = 0.1     # from 0.05
+
+        # Everything else can stay the same or be adjusted as needed
         self.replay_buffer_size = 20000
         self.min_buffer_size = 500
+        self.max_moves = 50  # Not used much if we have a dynamic curriculum, but keep if needed
 
 def get_dynamic_temperature(move_number: int, config: ImprovedMCTSConfig) -> float:
     """Get temperature based on game phase."""
@@ -398,168 +457,121 @@ class MultiHeadAttention(nn.Module):
 ############################
 
 class ChessNet(nn.Module):
-    def __init__(self, num_residual_blocks=12):  
+    def __init__(self, num_residual_blocks=12):
         super().__init__()
         
-        self.conv_input = nn.Conv2d(19, 512, kernel_size=3, padding=1)
-        self.bn_input = nn.BatchNorm2d(512)
+        self.conv_input = nn.Conv2d(19, 256, kernel_size=3, padding=1)
+        self.bn_input = nn.BatchNorm2d(256)
         
         self.residual_blocks = nn.ModuleList([
-            ResidualBlock(512) for _ in range(num_residual_blocks)
+            ResidualBlock(256) for _ in range(num_residual_blocks)
         ])
         
-        self.global_attention1 = MultiHeadAttention(512, num_heads=8, dropout=0.1)
-        self.global_attention2 = MultiHeadAttention(512, num_heads=8, dropout=0.1)
+        self.strategic_attention = StrategicAttention(hidden_dim=256)
         
         # Policy head
-        self.policy_conv1 = nn.Conv2d(512, 1024, kernel_size=3, padding=1)
-        self.policy_bn = nn.BatchNorm2d(1024)
-        self.policy_attention = MultiHeadAttention(1024, num_heads=4, dropout=0.1)
-        self.policy_conv2 = nn.Conv2d(1024, 73, kernel_size=1)
+        self.policy_conv1 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.policy_bn = nn.BatchNorm2d(256)
+        self.policy_conv2 = nn.Conv2d(256, 73, kernel_size=1)
         
         # Value head
-        self.value_conv1 = nn.Conv2d(512, 128, kernel_size=1)
+        self.value_conv1 = nn.Conv2d(256, 128, kernel_size=1)
         self.value_bn = nn.BatchNorm2d(128)
-        self.value_attention = MultiHeadAttention(128, num_heads=4, dropout=0.1)
-        self.value_fc1 = nn.Linear(128 * 64, 1024)
-        self.value_fc2 = nn.Linear(1024, 512)
-        self.value_fc3 = nn.Linear(512, 1)  
+        self.value_fc1 = nn.Linear(128 * 64, 256)
+        self.value_fc2 = nn.Linear(256, 1)
         
-        # Aux heads
-        self.auxiliary_policy = nn.Linear(1024, 73 * 64)
-        self.auxiliary_value = nn.Linear(1024, 1)
-        
-        self.dropout = nn.Dropout(0.2)
-        
+        # Reasoning generation
+        # Because our concept_descriptions is 8 in length,
+        # reasoning_logits ends up shape = (batch, 8).
+        # We fix the linear layer to input size=8, output=128:
+        self.explanation_fc = nn.Linear(8, 128)
+        self.explanation_lm = nn.GRU(128, 128, batch_first=True)
+        self.explanation_decoder = nn.Linear(128, 50)
+
+        # Instead of outputting (batch, 8) for "explanations",
+        # we do a separate layer for final "concept" output:
+        # We'll keep a short "reasoning_proj" for concept dimension=8
+        self.reasoning_proj = nn.Linear(256, 8)
+
     def forward(self, x):
-        batch_size = x.size(0)
-        
-        x = F.relu(self.bn_input(self.conv_input(x)))
-        
+        x = F.relu(self.bn_input(self.conv_input(x)))  # (batch, 256, 8, 8)
         for block in self.residual_blocks:
             x = block(x)
         
-        b, c, h, w = x.size()
-        x_flat = x.view(b, c, -1).transpose(1, 2)
-        x_att = self.global_attention1(x_flat, x_flat, x_flat)
-        x = x_att.transpose(1, 2).view(b, c, h, w) + x
+        batch_size = x.size(0)
+        x_flat = x.view(batch_size, 256, 64).transpose(1, 2)  # (batch, 64, 256)
         
-        x_flat = x.view(b, c, -1).transpose(1, 2)
-        x_att = self.global_attention2(x_flat, x_flat, x_flat)
-        x = x_att.transpose(1, 2).view(b, c, h, w) + x
+        # strategic attention
+        strategic_features, concept_scores = self.strategic_attention(x_flat)  # concept_scores -> (batch, 32)
         
-        # Policy
-        policy = F.relu(self.policy_bn(self.policy_conv1(x)))
-        policy_flat = policy.view(b, 1024, -1).transpose(1, 2)
-        policy_att = self.policy_attention(policy_flat, policy_flat, policy_flat)
-        policy = policy_att.transpose(1, 2).view(b, 1024, h, w)
-        policy = self.policy_conv2(policy)
-        policy_out = F.log_softmax(policy.view(b, -1), dim=1)
+        # policy
+        pol = F.relu(self.policy_bn(self.policy_conv1(x)))
+        pol = self.policy_conv2(pol)
+        policy_out = F.log_softmax(pol.view(batch_size, -1), dim=1)  # (batch, 73*64)
         
-        # Value
-        value = F.relu(self.value_bn(self.value_conv1(x)))
-        value_flat = value.view(b, 128, -1).transpose(1, 2)
-        value_att = self.value_attention(value_flat, value_flat, value_flat)
-        value = value_att.transpose(1, 2).view(b, 128, h, w)
-        value = value.reshape(b, -1)
+        # value
+        val = F.relu(self.value_bn(self.value_conv1(x)))
+        val = val.view(batch_size, -1)  # (batch, 128*64)
+        val = F.relu(self.value_fc1(val))  # -> (batch, 256)
+        value_out = torch.tanh(self.value_fc2(val))  # -> (batch, 1)
         
-        value = F.relu(self.value_fc1(value))
-        value_aux = value
-        value = self.dropout(value)
-        value = F.relu(self.value_fc2(value))
-        value = self.dropout(value)
-        value_out = torch.tanh(self.value_fc3(value))
-        
-        aux_policy = F.log_softmax(self.auxiliary_policy(value_aux), dim=1)
-        aux_value = torch.tanh(self.auxiliary_value(value_aux))
-        
-        return policy_out, value_out, aux_policy, aux_value
+        # final reasoning logits (for 8 concepts)
+        reasoning_logits = self.reasoning_proj(strategic_features.mean(dim=1))  # shape (batch, 8)
 
-############################
-# Standard MCTS Node
-############################
+        return policy_out, value_out, reasoning_logits, concept_scores
 
-class MCTSNode:
-    def __init__(self, board, parent=None, move=None, c_puct=3.0):
-        self.board = board
-        self.parent = parent
-        self.move = move
-        self.children = {}
-        self.visits = 0
-        self.value_sum = 0.0
-        self.prior = 0.0
-        self.is_expanded = False
-        self.is_terminal = board.is_game_over()
-        self.c_puct = c_puct
-    
-    def ucb_score(self, parent_visits):
-        if self.visits == 0:
-            return float('inf')
-        Q = self.value_sum / self.visits
-        U = self.c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.visits)
-        return Q + U
-    
-    def select_child(self):
-        if not self.children:
-            return None
-        # Calculate UCB
-        ucb_scores = []
-        for child in self.children.values():
-            if child.visits == 0:
-                score = float('inf')
-            else:
-                score = child.ucb_score(self.visits)
-            ucb_scores.append(score)
-        if not ucb_scores:
-            return None
-        best_idx = np.argmax(ucb_scores)
-        return list(self.children.values())[best_idx]
-    
-    def expand(self, policy):
-        if self.is_terminal:
-            return
-        legal_moves = list(self.board.legal_moves)
-        if not legal_moves:
-            self.is_terminal = True
-            return
-        policy_sum = 0
-        for move in legal_moves:
-            idx = self.move_to_index(move)
-            if idx < len(policy):
-                policy_sum += policy[idx]
-        if policy_sum > 0:
-            for move in legal_moves:
-                idx = self.move_to_index(move)
-                if idx < len(policy):
-                    child_board = self.board.copy()
-                    child_board.push(move)
-                    child = MCTSNode(
-                        child_board,
-                        parent=self,
-                        move=move,
-                        c_puct=self.c_puct
-                    )
-                    child.prior = policy[idx] / policy_sum
-                    self.children[move] = child
-            self.is_expanded = True
-    
-    def move_to_index(self, move):
-        from_square = move.from_square
-        to_square = move.to_square
-        promotion = move.promotion
-        if promotion is None:
-            return from_square * 64 + to_square
-        else:
-            # Handle promotions
-            if promotion == chess.QUEEN:
-                return 4096
-            elif promotion == chess.ROOK:
-                return 4097
-            elif promotion == chess.BISHOP:
-                return 4098
-            elif promotion == chess.KNIGHT:
-                return 4099
-        return 0
+    def get_reasoning(self, board_tensor: torch.Tensor) -> str:
+        """
+        Generate a short, toy chain-of-thought in text form 
+        using concept scores + a tiny GRU-based text decoder.
+        """
+        with torch.no_grad():
+            policy_out, value_out, reasoning_logits, concept_scores = self(board_tensor)
+            # reasoning_logits: (batch, 8)
+            
+            # Pass through explanation_fc -> shape (batch, 128)
+            hidden_rep = F.relu(self.explanation_fc(reasoning_logits))
+            
+            # We create a dummy sequence of length 5 tokens:
+            seq_len = 5
+            batch_size = hidden_rep.size(0)
+            # Expand hidden state across seq_len:
+            hidden_seq = hidden_rep.unsqueeze(1).expand(batch_size, seq_len, 128)
+            
+            # Forward pass through GRU:
+            _, h_n = self.explanation_lm(hidden_seq)  # h_n: (1, batch, 128)
+            h_n = h_n.squeeze(0)  # -> (batch, 128)
+            
+            # Decode to vocab logits:
+            vocab_logits = self.explanation_decoder(h_n)  # (batch, 50)
+            best_token_id = torch.argmax(vocab_logits, dim=1).item()
+
+            # -- Fix: ensure concept_scores is at least 2D --
+            # concept_scores might have shape (batch,) if it was accidentally squeezed.
+            # So we make sure it's (batch, N) for top-k:
+            if concept_scores.dim() < 2:
+                # If shape is (batch,) or scalar, unsqueeze(-1) to become (batch, 1)
+                concept_scores = concept_scores.unsqueeze(-1)
+
+            # Now safe to index concept_scores.shape[1]
+            # If there are fewer than 3 features, adjust k accordingly
+            feature_dim = concept_scores.shape[1]
+            k = min(feature_dim, 3)
+
+            # Extract top-k for the first item in the batch
+            topk_vals, topk_idxs = concept_scores[0].topk(k)
+
+            concept_lines = []
+            for idx, val in zip(topk_idxs.tolist(), topk_vals.tolist()):
+                concept_lines.append(f"{idx}: {val:.2f}")
+            
+            explanation = "Chain-of-Thought:\n"
+            explanation += f" - Top concepts: {', '.join(concept_lines)}\n"
+            explanation += f" - Chosen token: {best_token_id}\n"
+            explanation += " - Example: Pushing for safe King and center control.\n"
+            
+            return explanation
+
 
 ############################
 # (NEW) Plan-Level Classes
@@ -654,8 +666,90 @@ class PlanMCTSNode:
 # The ChessAgent Class
 ############################
 
+class MCTSNode:
+    def __init__(self, board, parent=None, move=None, c_puct=3.0):
+        self.board = board
+        self.parent = parent
+        self.move = move
+        self.children = {}
+        self.visits = 0
+        self.value_sum = 0.0
+        self.prior = 0.0
+        self.is_expanded = False
+        self.is_terminal = board.is_game_over()
+        self.c_puct = c_puct
+    
+    def ucb_score(self, parent_visits):
+        if self.visits == 0:
+            return float('inf')
+        Q = self.value_sum / self.visits
+        U = self.c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.visits)
+        return Q + U
+    
+    def select_child(self):
+        if not self.children:
+            return None
+        # Calculate UCB
+        ucb_scores = []
+        for child in self.children.values():
+            if child.visits == 0:
+                score = float('inf')
+            else:
+                score = child.ucb_score(self.visits)
+            ucb_scores.append(score)
+        if not ucb_scores:
+            return None
+        best_idx = np.argmax(ucb_scores)
+        return list(self.children.values())[best_idx]
+    
+    def expand(self, policy):
+        if self.is_terminal:
+            return
+        legal_moves = list(self.board.legal_moves)
+        if not legal_moves:
+            self.is_terminal = True
+            return
+        policy_sum = 0
+        for move in legal_moves:
+            idx = self.move_to_index(move)
+            if idx < len(policy):
+                policy_sum += policy[idx]
+        if policy_sum > 0:
+            for move in legal_moves:
+                idx = self.move_to_index(move)
+                if idx < len(policy):
+                    child_board = self.board.copy()
+                    child_board.push(move)
+                    child = MCTSNode(
+                        child_board,
+                        parent=self,
+                        move=move,
+                        c_puct=self.c_puct
+                    )
+                    child.prior = policy[idx] / policy_sum
+                    self.children[move] = child
+            self.is_expanded = True
+    
+    def move_to_index(self, move):
+        from_square = move.from_square
+        to_square = move.to_square
+        promotion = move.promotion
+        if promotion is None:
+            return from_square * 64 + to_square
+        else:
+            # Handle promotions
+            if promotion == chess.QUEEN:
+                return 4096
+            elif promotion == chess.ROOK:
+                return 4097
+            elif promotion == chess.BISHOP:
+                return 4098
+            elif promotion == chess.KNIGHT:
+                return 4099
+        return 0
+
 class ChessAgent:
-    def __init__(self, model=None, device='cpu', mcts_simulations=50):
+    def __init__(self, model=None, device='cpu', mcts_simulations=800):
         self.device = torch.device(device)
         print(f"Using device: {self.device}")
         
@@ -668,22 +762,18 @@ class ChessAgent:
         self.tt = TranspositionTable(size_mb=1000)
         self.total_nodes = 0
         
-        dummy_input = torch.zeros((1, 19, 8, 8)).to(self.device)
-        _ = self.model(dummy_input)
-        
-        self.model_params = list(self.model.parameters())
-        self.model_state = self.model.state_dict()
+        # Initialize with dummy input to build the model
+        _ = self.model(torch.zeros((1, 19, 8, 8), device=self.device))
         
         self.min_thinking_time = 1.0
         self.max_thinking_time = 10.0
         self.nodes_per_second = 1000
         
-        self.batch_size = 16
-        self.eval_cache = {}
         self.last_move_reward = 0.0
-
-        # A small "plan predictor" stub for optional hierarchical usage
-        self.plan_predictor = PlanPredictor().to(self.device)
+        self.last_reasoning = ""
+        
+        self.reward_calculator = RewardCalculator()
+        self.position_evaluator = PositionEvaluator()
 
     def board_to_input(self, board):
         if isinstance(board, list):
@@ -715,17 +805,141 @@ class ChessAgent:
         planes[18] = board.halfmove_clock / 100.0
         return planes
 
+    def select_move(self, board: chess.Board, temperature: float = 1.0) -> chess.Move:
+        """Select a move using opening book, MCTS and reasoning"""
+        # First check opening book
+        if board.fullmove_number <= 10:
+            fen = board.fen().split(' ')[0] + " " + ('w' if board.turn else 'b')
+            if fen in OPENING_BOOK:
+                moves = OPENING_BOOK[fen]
+                legal_book_moves = {}
+                for move_uci, weight in moves.items():
+                    try:
+                        move = chess.Move.from_uci(move_uci)
+                        if move in board.legal_moves:
+                            legal_book_moves[move] = weight
+                    except ValueError:
+                        continue
+                
+                if legal_book_moves:
+                    moves_list = list(legal_book_moves.keys())
+                    weights = list(legal_book_moves.values())
+                    total_weight = sum(weights)
+                    if total_weight > 0:
+                        probs = [w/total_weight for w in weights]
+                        selected_move = np.random.choice(moves_list, p=probs)
+                        self.last_move_reward = self.calculate_reward(board, selected_move)
+                        return selected_move
+        
+        # Get "human-like" reasoning about position
+        board_tensor = self.board_to_input(board)
+        self.last_reasoning = self.model.get_reasoning(board_tensor)  # <-- ADDED: capture chain-of-thought
+
+        # Use MCTS with the normal pipeline
+        root = MCTSNode(board, c_puct=self.c_puct)
+        self._run_mcts_batch(root, self.mcts_simulations)
+        
+        # Select move using visit counts
+        moves = []
+        visit_counts = []
+        for move, child in root.children.items():
+            moves.append(move)
+            visit_counts.append(child.visits)
+        
+        if not moves:
+            return None
+        
+        visit_counts = np.array(visit_counts, dtype=np.float32)
+        if np.sum(visit_counts) == 0:
+            # Fallback to uniform distribution
+            move_probs = np.ones_like(visit_counts) / len(visit_counts)
+        else:
+            if temperature < 0.01:
+                # Select most visited move
+                move_idx = np.argmax(visit_counts)
+                move_probs = np.zeros_like(visit_counts)
+                move_probs[move_idx] = 1.0
+            else:
+                # Sample based on visit counts
+                visit_counts = visit_counts ** (1.0 / temperature)
+                visit_sum = np.sum(visit_counts)
+                if visit_sum > 0:
+                    move_probs = visit_counts / visit_sum
+                else:
+                    move_probs = np.ones_like(visit_counts) / len(visit_counts)
+
+        move_probs = np.nan_to_num(move_probs, nan=1.0/len(move_probs))
+        move_probs = move_probs / np.sum(move_probs)
+        
+        try:
+            move_idx = np.random.choice(len(moves), p=move_probs)
+            selected_move = moves[move_idx]
+        except ValueError:
+            selected_move = random.choice(moves)
+        
+        self.last_move_reward = self.calculate_reward(board, selected_move)
+        return selected_move
+
+    def calculate_reward(self, board: chess.Board, move: chess.Move) -> float:
+        """Calculate reward using the enhanced reward calculator"""
+        return self.reward_calculator.calculate_reward(board, move, board.fullmove_number)
+
+    def evaluate_position(self, board: chess.Board) -> float:
+        """Evaluate position using the enhanced position evaluator"""
+        return self.position_evaluator.evaluate_position(board)
+
+    def _run_mcts_batch(self, root: MCTSNode, num_simulations: int):
+        """Run MCTS with normal policy evaluation"""
+        for _ in range(num_simulations):
+            node = root
+            search_path = [node]
+            
+            # Selection
+            while node.is_expanded and not node.is_terminal:
+                child = node.select_child()
+                if child is None:
+                    break
+                node = child
+                search_path.append(node)
+            
+            # Expansion & Evaluation
+            if node is not None and not node.is_terminal:
+                state = self.board_to_input(node.board)
+                with torch.no_grad():
+                    policy_out, value_out, reasoning_logits, concept_scores = self.model(state)
+                    policy = F.softmax(policy_out, dim=1)[0].cpu().numpy()
+                    value = value_out.item()
+                node.expand(policy)
+                
+                # Backup
+                current_value = value
+                for n in reversed(search_path):
+                    n.value_sum += current_value
+                    n.visits += 1
+                    current_value = -current_value
+
+    def get_last_reasoning(self):
+        """Return the reasoning for the last move"""
+        return self.last_reasoning
+
     def predict(self, boards):
+        """Get model predictions with reasoning"""
         if not isinstance(boards, torch.Tensor):
             boards = self.board_to_input(boards)
         with torch.no_grad():
-            policy, value, aux_policy, aux_value = self.model(boards)
-        return policy, value, aux_policy, aux_value
-    
-    def get_remaining_time(self, board):
-        return self.max_thinking_time
+            return self.model(boards)
+
+    def get_policy_for_board(self, board):
+        """Get policy distribution for a given board position"""
+        policy_dict = {}
+        legal_moves = list(board.legal_moves)
+        for move in legal_moves:
+            move_uci = move.uci()
+            policy_dict[move_uci] = 1.0 / len(legal_moves)
+        return policy_dict
 
     def move_to_index(self, move: chess.Move) -> int:
+        """Convert a chess move to a policy index"""
         from_square = move.from_square
         to_square = move.to_square
         promotion = move.promotion
@@ -766,10 +980,14 @@ class ChessAgent:
                     if total_weight > 0:
                         probs = [w/total_weight for w in weights]
                         selected_move = np.random.choice(moves_list, p=probs)
-                        self.last_move_reward = calculate_reward(board, selected_move)
+                        self.last_move_reward = self.calculate_reward(board, selected_move)
                         return selected_move
         
-        # 2) If not in opening book, run MCTS
+        # 2) If not in opening book, get chain-of-thought reasoning
+        board_tensor = self.board_to_input(board)
+        self.last_reasoning = self.model.get_reasoning(board_tensor)  # <-- ADDED for human-like reasoning
+
+        # 3) Run MCTS
         root = MCTSNode(board, c_puct=self.c_puct)
         self._run_mcts_batch(root, self.mcts_simulations)
         
@@ -808,7 +1026,7 @@ class ChessAgent:
         except ValueError:
             selected_move = random.choice(moves)
         
-        self.last_move_reward = calculate_reward(board, selected_move)
+        self.last_move_reward = self.calculate_reward(board, selected_move)
         return selected_move
 
     def _evaluate_position(self, node):
@@ -882,36 +1100,33 @@ class HierarchicalChessAgent(ChessAgent):
                     if total_weight > 0:
                         probs = [w/total_weight for w in weights]
                         selected_move = np.random.choice(moves_list, p=probs)
-                        self.last_move_reward = calculate_reward(board, selected_move)
+                        self.last_move_reward = self.calculate_reward(board, selected_move)
                         return selected_move
         
-        # Plan-level step:
-        # 1) Evaluate plan distribution
-        state = self.board_to_input(board)
-        plan_probs = self.plan_predictor(state)[0].detach().cpu().numpy()  # shape (plan_count,)
+        # 1) Get chain-of-thought reasoning again for demonstration
+        board_tensor = self.board_to_input(board)
+        self.last_reasoning = self.model.get_reasoning(board_tensor)  # <-- ADDED
+
+        # 2) Evaluate plan distribution
+        plan_probs = self.plan_predictor(board_tensor)[0].detach().cpu().numpy()  # shape (plan_count,)
         
-        # 2) Expand plan node
+        # 3) Expand plan node
         root = PlanMCTSNode(board, c_puct=self.c_puct)
         root.expand_plans(plan_probs)
         
-        # 3) For each plan child, run standard MCTS to evaluate moves consistent with that plan
-        # For simplicity, we’ll just run a small number of expansions per plan:
+        # 4) For each plan child, run standard MCTS
         for plan_id, plan_child in root.plan_children.items():
-            # We'll do a quick standard MCTS from plan_child.board:
-            # In a real system, you'd also restrict the moves to match the plan's theme
             plan_root_node = MCTSNode(plan_child.board, c_puct=self.c_puct)
             self._run_mcts_batch(plan_root_node, self.mcts_simulations // 5)
-            # Summarize the value:
             plan_child.value_sum = sum(child.visits for child in plan_root_node.children.values())
-            plan_child.visits = 1  # For a simplistic approach to backprop
+            plan_child.visits = 1
         
-        # 4) Select best plan
+        # 5) Select best plan
         plan_selection = root.select_child()
         if plan_selection is None:
-            # Fallback to default MCTS if no plan selected
             return super().select_move(board, temperature)
         
-        # 5) Now that we have "selected" a plan, we do one more standard MCTS from that board
+        # 6) More MCTS from chosen plan
         fallback_root = MCTSNode(plan_selection.board, c_puct=self.c_puct)
         self._run_mcts_batch(fallback_root, self.mcts_simulations)
         
@@ -933,5 +1148,5 @@ class HierarchicalChessAgent(ChessAgent):
 
         move_idx = np.random.choice(len(moves), p=move_probs)
         final_move = moves[move_idx]
-        self.last_move_reward = calculate_reward(plan_selection.board, final_move)
+        self.last_move_reward = self.calculate_reward(plan_selection.board, final_move)
         return final_move

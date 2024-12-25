@@ -1,4 +1,4 @@
-# Chess ML - Advanced Chess AI
+# Chess ML
 
 A modern chess game with an AI opponent powered by Monte Carlo Tree Search (MCTS) and deep learning.
 
