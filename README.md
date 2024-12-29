@@ -1,129 +1,107 @@
-# Chess ML
+# Chess ML with Reasoning
 
-A modern chess game with an AI opponent powered by Monte Carlo Tree Search (MCTS) and deep learning.
+A chess AI system that combines deep learning with reasoning capabilities, including causal understanding, strategic planning, and natural language explanation of its decisions.
 
 ## Features
 
-- AI opponent using advanced MCTS and neural networks
-- Opening book for strong early game play
-- Piece-square tables for positional understanding
-- Highlights legal moves when pieces are selected
-- Self-play training for continuous improvement
+- **Reasoning System**
+  - Causal model for understanding move consequences
+  - Strategic planning with multi-step reasoning
+  - Natural language explanations of decisions
+  - Concept learning from gameplay patterns
+
+- **Neural Network Architecture**
+  - GFlowNet-based reasoning engine
+  - Integrated world model for position understanding
+  - Concept learner for pattern recognition
+  - Inference machine for decision making
+
+- **Training & Evaluation**
+  - Self-play training with continuous improvement
+  - Comprehensive evaluation metrics
+  - Model checkpointing and versioning
+  - Performance analysis tools
+
+## Project Structure
+
+```
+chess-reasoning/
+├── src/
+│   ├── concepts/        # Chess concept learning
+│   ├── inference/       # Decision inference engine
+│   ├── language/        # Natural language processing
+│   ├── planning/        # Strategic planning
+│   ├── reasoning/       # Core reasoning modules
+│   ├── world_model/     # Position understanding
+│   └── utils/          # Helper utilities
+├── scripts/
+│   ├── train.py        # Training script
+│   └── evaluate.py     # Evaluation script
+└── gui/
+    └── chess_gui.py    # Interactive interface
+```
 
 ## Requirements
 
 - Python 3.8+
 - PyTorch
-- Pygame
-- python-chess
-- tqdm
+- Additional dependencies in setup.py
 
-Install dependencies:
+## Installation
+
 ```bash
-pip install -r requirements.txt
+# Clone the repository
+git clone https://github.com/yourusername/chess-reasoning.git
+cd chess-reasoning
+
+# Install the package and dependencies
+pip install -e .
 ```
 
 ## Usage
 
-### Play the Game
-Run the game:
+### Training the Model
+
 ```bash
-python chess_gui.py
+python scripts/train.py --epochs 100 --batch-size 32
 ```
 
-### Train the Model
-Train the AI through self-play:
+Key training parameters:
+- `--epochs`: Number of training epochs
+- `--batch-size`: Batch size for training
+- `--learning-rate`: Learning rate for optimization
+- `--checkpoint-dir`: Directory for saving model checkpoints
+
+### Evaluation
+
 ```bash
-python train.py
+python scripts/evaluate.py --model-path checkpoints/latest.pth
 ```
 
-The training script will:
-1. Play games using the current model
-2. Learn from the game outcomes
-3. Save model checkpoints every 10 iterations
-4. Save the final model as `chess_model.pth`
+### Playing Against the AI
 
-### Controls
-- Drag and drop pieces to make moves
-- Press 'N' for a new game
-- Close window to quit
-
-## Deployment
-
-### Option 1: Docker Deployment
-
-1. Build the Docker image:
 ```bash
-docker build -t chessml .
+python gui/chess_gui.py
 ```
 
-2. Run the container:
-```bash
-docker run -p 8000:8000 chessml
-```
+## Model Components
 
-### Option 2: Direct Deployment to a VPS
+### 1. Causal Model
+The system uses a causal model to understand the relationships between moves and their consequences, enabling better strategic planning.
 
-1. SSH into your server
-2. Clone the repository:
-```bash
-git clone <your-repo-url>
-cd chessml
-```
+### 2. Strategic Planner
+Implements multi-step reasoning to develop and execute complex strategies during gameplay.
 
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+### 3. Language Explainer
+Provides natural language explanations for the AI's decisions, making the system more interpretable and educational.
 
-4. Set up Nginx:
-```nginx
-server {
-    listen 80;
-    server_name chessml.fufoundation.co;
+### 4. Concept Learner
+Automatically learns and recognizes important chess patterns and concepts from gameplay data.
 
-    location / {
-        proxy_pass http://localhost:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
+## Contributing
 
-5. Run with gunicorn:
-```bash
-gunicorn --bind 0.0.0.0:8000 app:app
-```
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-6. Set up SSL with Let's Encrypt:
-```bash
-sudo certbot --nginx -d chessml.fufoundation.co
-```
+## Last Updated
 
-## Project Structure
-
-- `chess_gui.py` - Main game interface with drag-and-drop functionality
-- `chess_model.py` - AI implementation with MCTS and neural networks
-- `train.py` - Self-play training script
-- `assets/pieces/` - Chess piece images
-- `requirements.txt` - Python dependencies
-
-## How It Works
-
-The AI combines several advanced techniques:
-1. Monte Carlo Tree Search for move exploration
-2. Neural networks for position evaluation
-3. Opening book for strong early game
-4. Piece-square tables for positional play
-5. Self-play training similar to AlphaZero
-
-You play as White, and the AI plays as Black. The AI considers both tactical and strategic elements when choosing its moves.
-
-## Training Process
-
-The model learns through self-play training:
-1. The AI plays against itself to generate training data
-2. Each game produces board states, move probabilities, and outcomes
-3. The model learns to predict both good moves and game outcomes
-4. Temperature scheduling helps balance exploration and exploitation
-5. Parallel processing speeds up game generation
+December 28, 2024
