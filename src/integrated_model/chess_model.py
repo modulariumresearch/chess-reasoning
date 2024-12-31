@@ -98,40 +98,23 @@ class ChessModel(torch.nn.Module):
 
         logger.info("ChessModel initialized with all submodules.")
 
-    def get_move(self, board: chess.Board) -> Tuple[Optional[chess.Move], float, str]:
+    def get_move(self, board: chess.Board) -> Tuple[Optional[chess.Move], float]:
         """
         Main API method to pick a move from the current board, 
-        combining knowledge from the inference machine, concept learner, 
-        strategic planner, and language explainer.
+        using the strategic planner.
 
         Returns:
-            (best_move, best_reward, explanation)
+            (best_move, best_score)
         """
-        # 1) Possibly generate a short strategic plan
+        # Generate a strategic plan
         plan_dict = self.strategic_planner.generate_plan(board, side=board.turn)
-        plan_moves = plan_dict["moves"]
-        plan_score = plan_dict["score"]
-        plan_str = self._summarize_plan(plan_dict)
-
-        # 2) Detect concepts
-        concept_scores = self.concept_learner.detect_concepts(board)
-
-        # 3) Use the inference machine to sample or pick best move
-        #    e.g. GFlowNet approach => propose_best_solution, or sample multiple solutions
-        best_solution = self.inference_machine.propose_best_move(board)
-        best_move, best_reward = best_solution  # (chess.Move, float)
-
-        if best_move is None:
-            return None, 0.0, "No legal moves available"
-
-        # 4) Generate explanation for the chosen move
-        explanation = self.language_explainer.explain_move(
-            board, 
-            best_move, 
-            concept_scores=concept_scores, 
-            plan_summary=plan_str
-        )
-        return best_move, best_reward, explanation
+        
+        # If we have moves in the plan, return the first one
+        if plan_dict["moves"]:
+            return plan_dict["moves"][0], plan_dict["score"]
+        
+        # No moves available
+        return None, 0.0
 
     def train_step(
         self,

@@ -103,12 +103,14 @@ class StrategicPlanner:
           }
         """
         # We'll do a simple best-first approach:
-        # States in the priority queue: ( -score, depth, [moves_so_far], current_board )
+        # States in the priority queue: ( -score, counter, depth, [moves_so_far], current_board )
         # We use negative score because heapq is a min-heap by default, 
         # and we want to pick the maximum score.
+        # Counter is used to break ties and ensure stable ordering
 
         initial_score = self.evaluate_strategic(board)
-        initial_state = (-initial_score, 0, [], board.copy())
+        counter = 0  # Add a counter for unique ordering
+        initial_state = (-initial_score, counter, 0, [], board.copy())
 
         frontier = []
         heapq.heappush(frontier, initial_state)
@@ -120,7 +122,7 @@ class StrategicPlanner:
         }
 
         while frontier:
-            neg_score, depth, moves_so_far, current_board = heapq.heappop(frontier)
+            neg_score, _, depth, moves_so_far, current_board = heapq.heappop(frontier)
             score = -neg_score
 
             # If this is better than our known best, update
@@ -143,7 +145,8 @@ class StrategicPlanner:
 
                 new_score = self.evaluate_strategic(new_board)
                 new_moves_so_far = moves_so_far + [move]
-                new_state = (-new_score, depth + 1, new_moves_so_far, new_board)
+                counter += 1  # Increment counter for unique ordering
+                new_state = (-new_score, counter, depth + 1, new_moves_so_far, new_board)
                 heapq.heappush(frontier, new_state)
 
         return best_plan
@@ -240,7 +243,7 @@ class StrategicPlanner:
         }
 
         while frontier:
-            neg_score, depth, moves_so_far, current_board = heapq.heappop(frontier)
+            neg_score, _, depth, moves_so_far, current_board = heapq.heappop(frontier)
             score = -neg_score
 
             if score > best_plan['score']:
