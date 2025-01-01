@@ -9,7 +9,7 @@ from typing import Optional, Tuple, Dict, Any
 from src.world_model.base_world_model import ChessWorldModel
 # If you named your inference module differently, fix the path:
 from src.inference.inference_machine import InferenceMachine
-# or: from src.reasoning.gflownet import GFlowNetChessReasoner
+# or: from reasoning.gflownet import GFlowNetChessReasoner
 
 from src.concepts.concept_learner import ConceptLearner
 from src.planning.strategic_planner import StrategicPlanner

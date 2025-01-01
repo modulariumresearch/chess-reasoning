@@ -6,6 +6,8 @@ chess_reasoning.egg-info/SOURCES.txt
 chess_reasoning.egg-info/dependency_links.txt
 chess_reasoning.egg-info/requires.txt
 chess_reasoning.egg-info/top_level.txt
+gui/__init__.py
+gui/chess_gui.py
 src/__init__.py
 src/concepts/__init__.py
 src/concepts/concept_learner.py

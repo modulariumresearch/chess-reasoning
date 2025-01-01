@@ -84,13 +84,13 @@ class StrategicPlanner:
             raise ValueError(f"Unknown objective '{objective}'")
         self.objective_weights[objective] = weight
 
-    def generate_plan(self, board: chess.Board, side: bool = True) -> Dict[str, Union[List[chess.Move], float]]:
+    def generate_plan(self, board: chess.Board, side: bool = True) -> Dict[str, Union[List[chess.Move], float, chess.Board]]:
         """
         Returns a "plan" for the player 'side' (True=White, False=Black) 
         by enumerating or best-first searching up to self.plan_depth moves from the 'board'.
 
         side = True => we plan White's moves, skipping Black's replies 
-                       (or we can do White+Black moves if we want a full sequence).
+                   (or we can do White+Black moves if we want a full sequence).
         By default, we skip the opponent's moves for simplicity, 
         so we only consider "our" moves. 
         But you can adapt this if you want full turn-by-turn expansions.
@@ -102,54 +102,46 @@ class StrategicPlanner:
             'final_board': the new board state after those moves
           }
         """
-        # We'll do a simple best-first approach:
-        # States in the priority queue: ( -score, counter, depth, [moves_so_far], current_board )
-        # We use negative score because heapq is a min-heap by default, 
-        # and we want to pick the maximum score.
-        # Counter is used to break ties and ensure stable ordering
-
-        initial_score = self.evaluate_strategic(board)
-        counter = 0  # Add a counter for unique ordering
-        initial_state = (-initial_score, counter, 0, [], board.copy())
-
-        frontier = []
-        heapq.heappush(frontier, initial_state)
-
-        best_plan = {
-            'moves': [],
-            'score': initial_score,
-            'final_board': board.copy()
+        # Get legal moves for the current position
+        legal_moves = list(board.legal_moves)
+        
+        if not legal_moves:
+            return {
+                'moves': [],
+                'score': float('-inf') if side else float('inf'),
+                'final_board': board.copy()
+            }
+            
+        # Score each move
+        best_score = float('-inf') if side else float('inf')
+        best_move = None
+        best_board = None
+        
+        for move in legal_moves:
+            # Try the move
+            new_board = board.copy()
+            new_board.push(move)
+            
+            # Evaluate the resulting position
+            score = self.evaluate_strategic(new_board)
+            
+            # Update best move if this is better
+            if side:  # White maximizes
+                if score > best_score:
+                    best_score = score
+                    best_move = move
+                    best_board = new_board
+            else:  # Black minimizes
+                if score < best_score:
+                    best_score = score
+                    best_move = move
+                    best_board = new_board
+        
+        return {
+            'moves': [best_move] if best_move else [],
+            'score': best_score,
+            'final_board': best_board if best_board else board.copy()
         }
-
-        while frontier:
-            neg_score, _, depth, moves_so_far, current_board = heapq.heappop(frontier)
-            score = -neg_score
-
-            # If this is better than our known best, update
-            if score > best_plan['score']:
-                best_plan['moves'] = moves_so_far
-                best_plan['score'] = score
-                best_plan['final_board'] = current_board
-
-            if depth >= self.plan_depth:
-                # We've reached maximum depth of planning
-                continue
-
-            # Get legal moves for 'side' only
-            # If we want full turn-based expansions, we'd alternate side each depth.
-            legal_moves = self._get_legal_moves_for_side(current_board, side)
-
-            for move in legal_moves:
-                new_board = current_board.copy()
-                new_board.push(move)
-
-                new_score = self.evaluate_strategic(new_board)
-                new_moves_so_far = moves_so_far + [move]
-                counter += 1  # Increment counter for unique ordering
-                new_state = (-new_score, counter, depth + 1, new_moves_so_far, new_board)
-                heapq.heappush(frontier, new_state)
-
-        return best_plan
 
     def evaluate_strategic(self, board: chess.Board) -> float:
         """
@@ -160,36 +152,22 @@ class StrategicPlanner:
 
         You can expand with more advanced or causal metrics as needed.
         """
-        # We rely on the world_model for partial evaluations
-        # e.g. evaluate_position might return {
-        #   'embedding': (128,)-tensor,
-        #   'material_balance': (1,)-scalar,
-        #   'piece_activity': (1,)-scalar,
-        #   'king_safety': ...
-        #   ...
-        # }
-        # If your base_world_model doesn't have these, you can define them similarly.
-
+        # Get evaluations from the world model
         eval_dict = self.world_model.evaluate_position(board)
-        score_sum = 0.0
-
-        for objective in self.strategic_objectives:
-            weight = self.objective_weights.get(objective, 1.0)
-
-            # The world_model's evaluate_position might store each metric under
-            # the same key name, or you might have to adapt. 
-            # Example if 'material_balance' is a single scalar float in the dict:
-            if objective in eval_dict:
-                # If eval_dict[objective] is a Tensor, convert to float
-                val = eval_dict[objective]
-                if isinstance(val, torch.Tensor):
-                    val = float(val.item()) if val.numel() == 1 else float(val.mean().item())
-                score_sum += weight * val
-            else:
-                # If not found, skip or assume 0
-                continue
-
-        return score_sum
+        
+        # Convert material balance to float
+        material_balance = float(eval_dict["material_mean"].item())
+        
+        # Get embedding uncertainty as a confidence measure
+        uncertainty = float(eval_dict["embedding_uncertainty"].item())
+        
+        # Compute final score based on material and uncertainty
+        # For black's moves, we negate the score since black wants to minimize
+        score = material_balance * (1.0 - uncertainty)
+        if not board.turn:  # If it's black's turn
+            score = -score
+            
+        return score
 
     # -------------------------------------------------------------------------
     #   Additional or advanced features
