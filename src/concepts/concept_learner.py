@@ -8,7 +8,7 @@ from typing import Dict, List, Set, Optional, Any
 import random
 
 # Adjust this import if needed, depending on your project structure
-from src.world_model.base_world_model import ChessWorldModel
+from ..world_model.base_world_model import ChessWorldModel
 
 
 class ChessConcept:

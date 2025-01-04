@@ -8,7 +8,7 @@ from typing import List, Dict, Optional, Tuple, Union
 import random
 
 # Adjust the import path to match where you placed ChessWorldModel
-from src.world_model.base_world_model import ChessWorldModel
+from ..world_model.base_world_model import ChessWorldModel
 
 
 class PartialState:

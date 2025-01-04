@@ -6,14 +6,14 @@ import logging
 from typing import Optional, Tuple, Dict, Any
 
 # Adjust these imports to match your actual structure.
-from src.world_model.base_world_model import ChessWorldModel
+from ..world_model.base_world_model import ChessWorldModel
 # If you named your inference module differently, fix the path:
-from src.inference.inference_machine import InferenceMachine
-# or: from reasoning.gflownet import GFlowNetChessReasoner
+from ..inference.inference_machine import InferenceMachine
+# or: from ..reasoning.gflownet import GFlowNetChessReasoner
 
-from src.concepts.concept_learner import ConceptLearner
-from src.planning.strategic_planner import StrategicPlanner
-from src.language.language_explainer import LanguageExplainer
+from ..concepts.concept_learner import ConceptLearner
+from ..planning.strategic_planner import StrategicPlanner
+from ..language.language_explainer import LanguageExplainer
 
 logger = logging.getLogger(__name__)
 

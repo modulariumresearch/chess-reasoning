@@ -185,7 +185,11 @@ class ChessWorldModel(nn.Module):
                 # piece_type: 1..6 => index in piece_values is piece_type
                 val = piece_values[piece.piece_type]
                 balance += val if piece.color else -val
-        return torch.tensor(balance, device=self.device)
+        # Convert to tensor and move to device
+        if isinstance(balance, torch.Tensor):
+            return balance.clone().detach().to(self.device)
+        else:
+            return torch.tensor(balance, device=self.device)
 
     # -------------------------------------------------------------------------
     # CAUSAL & COUNTERFACTUAL UTILITIES

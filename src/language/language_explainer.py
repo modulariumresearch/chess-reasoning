@@ -14,9 +14,9 @@ from transformers import (
 )
 
 # Adjust if your code uses the following modules
-from src.world_model.base_world_model import ChessWorldModel
-# from src.concepts.concept_learner import ConceptLearner
-# from src.planning.strategic_planner import StrategicPlanner
+from ..world_model.base_world_model import ChessWorldModel
+from ..concepts.concept_learner import ConceptLearner
+from ..planning.strategic_planner import StrategicPlanner
 
 
 logger = logging.getLogger(__name__)

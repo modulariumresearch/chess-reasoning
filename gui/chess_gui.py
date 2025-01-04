@@ -58,33 +58,51 @@ class ReasoningDisplay:
         self.reasoning_text = []
         self.evaluation = score
 
+        # Material balance
         if 'material_balance' in knowledge:
             material = float(knowledge['material_balance'])
-            self.reasoning_text.append(f"Material: {material:+.1f}")
+            self.reasoning_text.append(f"Material Balance: {material:+.2f}")
 
+        # King safety
         if 'king_safety' in knowledge:
             safety = knowledge['king_safety']
-            self.reasoning_text.append(
-                f"KingSafety (W:{float(safety[0]):.2f}, B:{float(safety[1]):.2f})"
-            )
+            w_safety = float(safety[0])
+            b_safety = float(safety[1])
+            self.reasoning_text.append(f"King Safety:")
+            self.reasoning_text.append(f"  White: {w_safety:.2f}")
+            self.reasoning_text.append(f"  Black: {b_safety:.2f}")
 
+        # Mobility
         if 'mobility' in knowledge:
             mobility = knowledge['mobility']
-            self.reasoning_text.append(
-                f"Mobility (W:{float(mobility[0]):.2f}, B:{float(mobility[1]):.2f})"
-            )
+            w_mob = float(mobility[0])
+            b_mob = float(mobility[1])
+            self.reasoning_text.append(f"Piece Mobility:")
+            self.reasoning_text.append(f"  White: {w_mob:.2f}")
+            self.reasoning_text.append(f"  Black: {b_mob:.2f}")
 
+        # Pawn structure
         if 'pawn_structure' in knowledge:
             pawns = knowledge['pawn_structure']
-            self.reasoning_text.append(
-                f"PawnStruct (W:{float(pawns[0]):.2f}, B:{float(pawns[1]):.2f})"
-            )
+            w_pawns = float(pawns[0])
+            b_pawns = float(pawns[1])
+            self.reasoning_text.append(f"Pawn Structure:")
+            self.reasoning_text.append(f"  White: {w_pawns:+.2f}")
+            self.reasoning_text.append(f"  Black: {b_pawns:+.2f}")
+
+        # Model uncertainty
+        if 'embedding_uncertainty' in knowledge:
+            uncertainty = float(knowledge['embedding_uncertainty'])
+            confidence = 1.0 - min(uncertainty, 1.0)
+            self.reasoning_text.append(f"Confidence: {confidence:.1%}")
 
     def draw(self, surface: pygame.Surface, x: int, y: int, width: int, height: int):
         """Draw the reasoning panel, including an evaluation bar."""
+        # Draw title
         title = self.font.render("AI Reasoning", True, TEXT_COLOR)
         surface.blit(title, (x + 20, y + 20))
 
+        # Draw evaluation bar
         bar_height = 200
         bar_width = 30
         bar_x = x + width - bar_width - 20
@@ -97,17 +115,22 @@ class ReasoningDisplay:
         eval_normal = max(-1.0, min(1.0, self.evaluation))
         fill_height = int(bar_height * (0.5 - eval_normal / 2.0))
 
-        # Fill
-        pygame.draw.rect(surface, EVAL_BAR_FG,
-                         (bar_x, bar_y + fill_height, bar_width, bar_height - fill_height))
+        # Fill bar
+        pygame.draw.rect(surface, EVAL_BAR_FG, 
+                        (bar_x, bar_y + fill_height, bar_width, bar_height - fill_height))
 
-        # Text lines
+        # Draw reasoning text
+        text_x = x + 20
         text_y = y + 60
-        line_spacing = 26
-        for line in self.reasoning_text:
-            line_surf = self.small_font.render(line, True, TEXT_COLOR)
-            surface.blit(line_surf, (x + 20, text_y))
-            text_y += line_spacing
+        line_height = 25
+
+        for i, text in enumerate(self.reasoning_text):
+            color = TEXT_COLOR
+            if text.startswith("  "):  # Indented items
+                rendered = self.small_font.render(text, True, color)
+            else:  # Headers
+                rendered = self.font.render(text, True, color)
+            surface.blit(rendered, (text_x, text_y + i * line_height))
 
 
 class ChessGUI:
@@ -150,6 +173,13 @@ class ChessGUI:
         # For storing the AI's move result
         self.ai_move_result: Optional[chess.Move] = None
         self.ai_move_score: float = 0.0
+        self.ai_move_explanation: Optional[str] = None
+
+        # Add promotion state
+        self.promotion_square = None
+        self.promotion_move = None
+        self.showing_promotion = False
+        self.promotion_buttons = []
 
         self.clock = pygame.time.Clock()
 
@@ -178,25 +208,39 @@ class ChessGUI:
         cpath = "checkpoints/chess_model_epoch_1.pt"
         if os.path.exists(cpath):
             try:
+                print(f"Loading checkpoint from {os.path.abspath(cpath)}")
                 checkpoint = torch.load(cpath)
-                # Extract world model weights
-                world_model_dict = {k[11:]: v for k, v in checkpoint.items() if k.startswith('world_model.')}
+                print("Checkpoint loaded, keys:", list(checkpoint.keys()))
+                
+                # Extract world model weights, removing leading dots
+                world_model_dict = {k[11:].lstrip('.'): v for k, v in checkpoint.items() if k.startswith('world_model.')}
+                print("World model keys:", list(world_model_dict.keys()))
                 self.model.world_model.load_state_dict(world_model_dict)
+                print("World model loaded successfully")
                 
-                # Extract inference machine weights
-                inference_dict = {k[17:]: v for k, v in checkpoint.items() if k.startswith('inference_machine.')}
+                # Extract inference machine weights, removing leading dots
+                inference_dict = {k[17:].lstrip('.'): v for k, v in checkpoint.items() if k.startswith('inference_machine.')}
+                print("Inference machine keys:", list(inference_dict.keys()))
                 self.model.inference_machine.load_state_dict(inference_dict)
+                print("Inference machine loaded successfully")
                 
-                # Extract concept learner weights
-                concept_dict = {k[15:]: v for k, v in checkpoint.items() if k.startswith('concept_learner.')}
+                # Extract concept learner weights, removing leading dots
+                concept_dict = {k[15:].lstrip('.'): v for k, v in checkpoint.items() if k.startswith('concept_learner.')}
+                print("Concept learner keys:", list(concept_dict.keys()))
                 self.model.concept_learner.load_state_dict(concept_dict)
+                print("Concept learner loaded successfully")
                 
                 self.model.eval()
-                print("Loaded model weights from chess_model_epoch_1.pt")
+                print("Model set to eval mode")
             except Exception as e:
-                print(f"Error loading: {e}\nUsing untrained model.")
+                print(f"Error loading model: {str(e)}")
+                print(f"Error type: {type(e)}")
+                import traceback
+                traceback.print_exc()
+                print("Using untrained model as fallback.")
         else:
-            print("No checkpoint found, using untrained model.")
+            print(f"No checkpoint found at {os.path.abspath(cpath)}")
+            print("Using untrained model.")
 
     def draw_board(self):
         """Render board, pieces, right panel, etc."""
@@ -271,48 +315,156 @@ class ChessGUI:
         rank = 7 - (y // SQUARE_SIZE)
         return chess.square(file, rank)
 
+    def draw_promotion_dialog(self):
+        """Draw the pawn promotion selection dialog."""
+        if not self.showing_promotion:
+            return
+            
+        # Dialog background
+        dialog_width = 200
+        dialog_height = 250
+        dialog_x = (WINDOW_WIDTH - dialog_width) // 2
+        dialog_y = (WINDOW_HEIGHT - dialog_height) // 2
+        
+        pygame.draw.rect(self.screen, RIGHT_PANEL_BG, 
+                        (dialog_x, dialog_y, dialog_width, dialog_height))
+        pygame.draw.rect(self.screen, BOARD_BORDER_COLOR, 
+                        (dialog_x, dialog_y, dialog_width, dialog_height), 2)
+        
+        # Title
+        title = self.font.render("Promote to:", True, TEXT_COLOR)
+        title_x = dialog_x + (dialog_width - title.get_width()) // 2
+        self.screen.blit(title, (title_x, dialog_y + 10))
+        
+        # Piece buttons
+        button_size = 50
+        pieces = ['q', 'r', 'b', 'n']  # Queen, Rook, Bishop, Knight
+        self.promotion_buttons = []
+        
+        for i, piece in enumerate(pieces):
+            button_x = dialog_x + (dialog_width - button_size) // 2
+            button_y = dialog_y + 60 + i * (button_size + 10)
+            button_rect = pygame.Rect(button_x, button_y, button_size, button_size)
+            
+            # Draw button background
+            pygame.draw.rect(self.screen, LIGHT_SQUARE, button_rect)
+            pygame.draw.rect(self.screen, BOARD_BORDER_COLOR, button_rect, 1)
+            
+            # Draw piece
+            piece_key = 'w' + piece if self.board.turn else 'b' + piece
+            if piece_key in self.pieces:
+                piece_img = self.pieces[piece_key]
+                piece_x = button_x + (button_size - piece_img.get_width()) // 2
+                piece_y = button_y + (button_size - piece_img.get_height()) // 2
+                self.screen.blit(piece_img, (piece_x, piece_y))
+            
+            self.promotion_buttons.append((button_rect, piece))
+
+    def handle_promotion_click(self, pos):
+        """Handle clicks on the promotion dialog."""
+        if not self.showing_promotion:
+            return False
+            
+        for button, piece in self.promotion_buttons:
+            if button.collidepoint(pos):
+                # Create the promotion move
+                promotion_piece = {
+                    'q': chess.QUEEN,
+                    'r': chess.ROOK,
+                    'b': chess.BISHOP,
+                    'n': chess.KNIGHT
+                }[piece]
+                
+                move = chess.Move(
+                    self.promotion_move.from_square,
+                    self.promotion_move.to_square,
+                    promotion=promotion_piece
+                )
+                
+                # Make the move
+                self.board.push(move)
+                self.showing_promotion = False
+                self.promotion_move = None
+                self.promotion_square = None
+                
+                # Start AI's turn
+                self.status = "AI is thinking..."
+                self.begin_ai_move_async()
+                return True
+                
+        return False
+        
+    def is_promotion_move(self, move):
+        """Check if a move would result in pawn promotion."""
+        piece = self.board.piece_at(move.from_square)
+        if piece is None or piece.piece_type != chess.PAWN:
+            return False
+            
+        rank = chess.square_rank(move.to_square)
+        return (piece.color and rank == 7) or (not piece.color and rank == 0)
+
+    def check_game_end(self):
+        """Check for end-of-game conditions."""
+        if self.board.is_game_over():
+            if self.board.is_checkmate():
+                winner = "Black" if self.board.turn else "White"
+                self.status = f"Checkmate! {winner} wins!"
+            elif self.board.is_stalemate():
+                self.status = "Game Over! Stalemate!"
+            elif self.board.is_insufficient_material():
+                self.status = "Game Over! Draw by insufficient material!"
+            elif self.board.is_fifty_moves():
+                self.status = "Game Over! Draw by fifty-move rule!"
+            elif self.board.is_repetition():
+                self.status = "Game Over! Draw by repetition!"
+            else:
+                self.status = "Game Over! It's a draw!"
+
     def run(self):
         """Main loop, with event handling & asynchronous AI moves."""
         running = True
         while running:
-            # check if AI thread finished => if so, apply its results
-            if self.ai_thread and not self.ai_thread.is_alive() and self.ai_thinking:
-                # AI thread is done
-                self.ai_thinking = False
-                self.complete_ai_move()
-
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
 
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    # Handle promotion dialog first
+                    if self.showing_promotion:
+                        if self.handle_promotion_click(event.pos):
+                            continue
+                    
                     # user clicks
                     if not self.ai_thinking:  # only let user move if AI not thinking
                         sq = self.get_square_from_pos(event.pos)
                         if sq is not None:
                             piece = self.board.piece_at(sq)
-                            if piece and piece.color == self.board.turn:
+                            if piece is not None and piece.color == self.board.turn:
                                 self.selected_piece = sq
-                                self.drag_piece = sq
                                 self.dragging = True
+                                self.drag_piece = sq
                                 self.drag_pos = event.pos
-                                # legal moves from that square
                                 self.legal_moves = {
                                     mv.to_square for mv in self.board.legal_moves
                                     if mv.from_square == sq
                                 }
 
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                    if self.dragging and not self.ai_thinking:
+                    if self.dragging and not self.ai_thinking and not self.showing_promotion:
                         end_sq = self.get_square_from_pos(event.pos)
                         if end_sq is not None and end_sq in self.legal_moves:
                             move = chess.Move(self.drag_piece, end_sq)
-                            self.board.push(move)
-                            self.status = "AI is thinking..."
-                            self.draw_board()
-                            pygame.display.flip()
-                            self.begin_ai_move_async()
-
+                            
+                            # Check for promotion
+                            if self.is_promotion_move(move):
+                                self.showing_promotion = True
+                                self.promotion_move = move
+                                self.promotion_square = end_sq
+                            else:
+                                self.board.push(move)
+                                self.status = "AI is thinking..."
+                                self.begin_ai_move_async()
+                                
                         self.dragging = False
                         self.drag_piece = None
                         self.selected_piece = None
@@ -330,18 +482,26 @@ class ChessGUI:
                             self.legal_moves.clear()
                             self.reasoning = ReasoningDisplay(self.font, self.font_small)
 
+            # Check if AI thread is done
+            if self.ai_thinking and self.ai_thread is not None and not self.ai_thread.is_alive():
+                self.complete_ai_move()
+                self.ai_thread = None
+                self.ai_thinking = False
+
             self.draw_board()
+            if self.showing_promotion:
+                self.draw_promotion_dialog()
             pygame.display.flip()
             self.clock.tick(FPS)
 
         pygame.quit()
 
-    # -----------------------------
-    #   AI-Async Logic
-    # -----------------------------
-
     def begin_ai_move_async(self):
         """Start a background thread to compute the AI move, so GUI won't freeze."""
+        if self.board.is_game_over():
+            self.ai_thinking = False
+            return
+
         self.ai_thinking = True
         self.ai_thread = threading.Thread(target=self._ai_worker)
         self.ai_thread.daemon = True
@@ -349,13 +509,22 @@ class ChessGUI:
 
     def _ai_worker(self):
         """This runs in a background thread: calls model.get_move, stores results."""
-        if not self.board.is_game_over():
-            move, score = self.model.get_move(self.board)
-            self.ai_move_result = move
-            self.ai_move_score = score
-        else:
+        try:
+            # Only compute move if game is not over
+            if not self.board.is_game_over():
+                move, score = self.model.get_move(self.board)
+                self.ai_move_result = move
+                self.ai_move_score = score
+                self.ai_move_explanation = "Move chosen based on strategic evaluation"
+            else:
+                self.ai_move_result = None
+                self.ai_move_score = 0.0
+                self.ai_move_explanation = "Game is over"
+        except Exception as e:
+            print(f"Error in AI worker: {e}")
             self.ai_move_result = None
             self.ai_move_score = 0.0
+            self.ai_move_explanation = f"Error occurred: {str(e)}"
 
     def complete_ai_move(self):
         """
@@ -367,10 +536,13 @@ class ChessGUI:
             self.reasoning.update(knowledge, self.ai_move_score)
             san = self.board.san(self.ai_move_result)  # Get SAN before making the move
             self.board.push(self.ai_move_result)
-            self.status = f"AI moved {san}"
+            
+            # Always display the explanation
+            self.status = f"AI moved {san}\n{self.ai_move_explanation}"
+            
             self.check_game_end()
             if not self.board.is_game_over():
-                self.status = "Your turn (White)"
+                self.status = f"Your turn (White)\nLast AI move: {san}"
         else:
             # fallback random if AI gave invalid move
             legals = list(self.board.legal_moves)
@@ -378,19 +550,13 @@ class ChessGUI:
                 m = random.choice(legals)
                 san = self.board.san(m)  # Get SAN before making the move
                 self.board.push(m)
-                self.status = f"AI moved randomly {san}"
+                self.status = f"AI moved randomly {san}\nReason: Had to make a random move"
                 self.check_game_end()
+            else:
+                self.status = "Game Over!"
 
         self.ai_move_result = None
-
-    def check_game_end(self):
-        """Check for end-of-game conditions."""
-        if self.board.is_game_over():
-            if self.board.is_checkmate():
-                winner = "Black" if self.board.turn else "White"
-                self.status = f"Checkmate! {winner} wins!"
-            else:
-                self.status = "Game Over! It's a draw!"
+        self.ai_move_explanation = None
 
 def main():
     print("Starting Chess GUI with async AI (chess_model_epoch_1.pt).")

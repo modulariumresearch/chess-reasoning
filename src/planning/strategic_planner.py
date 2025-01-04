@@ -8,9 +8,9 @@ import copy
 import math
 
 # Adjust these imports to your actual project structure
-from src.world_model.base_world_model import ChessWorldModel
+from ..world_model.base_world_model import ChessWorldModel
 # If you want concept-based synergy, import your concept learner:
-# from src.concepts.concept_learner import ConceptLearner
+# from concepts.concept_learner import ConceptLearner
 
 
 class StrategicPlanner:
@@ -152,22 +152,103 @@ class StrategicPlanner:
 
         You can expand with more advanced or causal metrics as needed.
         """
-        # Get evaluations from the world model
-        eval_dict = self.world_model.evaluate_position(board)
-        
-        # Convert material balance to float
-        material_balance = float(eval_dict["material_mean"].item())
-        
-        # Get embedding uncertainty as a confidence measure
-        uncertainty = float(eval_dict["embedding_uncertainty"].item())
-        
-        # Compute final score based on material and uncertainty
-        # For black's moves, we negate the score since black wants to minimize
-        score = material_balance * (1.0 - uncertainty)
-        if not board.turn:  # If it's black's turn
-            score = -score
+        try:
+            # Get evaluations from the world model
+            eval_dict = self.world_model.evaluate_position(board)
             
-        return score
+            # Base score from material evaluation
+            material_score = float(eval_dict["material_mean"].item())
+            
+            # Uncertainty penalty (reduce score confidence if uncertain)
+            uncertainty = float(eval_dict["embedding_uncertainty"].unsqueeze(0).item())
+            uncertainty_factor = max(0.1, 1.0 - uncertainty)  # Never go below 0.1
+            
+            # Simple piece-square tables for positional evaluation
+            def piece_square_value(piece: chess.Piece, square: int) -> float:
+                rank = chess.square_rank(square)
+                file = chess.square_file(square)
+                
+                # Adjust rank perspective for black pieces
+                if not piece.color:
+                    rank = 7 - rank
+                
+                value = 0.0
+                
+                # Pawns: prefer center control and advancement
+                if piece.piece_type == chess.PAWN:
+                    value = 0.1 * rank  # Forward movement
+                    if 2 <= file <= 5 and 2 <= rank <= 5:
+                        value += 0.2  # Center control
+                
+                # Knights: prefer central squares
+                elif piece.piece_type == chess.KNIGHT:
+                    if 2 <= file <= 5 and 2 <= rank <= 5:
+                        value += 0.3
+                
+                # Bishops: prefer diagonals and center
+                elif piece.piece_type == chess.BISHOP:
+                    if 2 <= file <= 5 and 2 <= rank <= 5:
+                        value += 0.3
+                
+                # Rooks: prefer 7th rank and open files
+                elif piece.piece_type == chess.ROOK:
+                    if rank == 6:  # 7th rank
+                        value += 0.4
+                
+                # Queens: slight center preference
+                elif piece.piece_type == chess.QUEEN:
+                    if 2 <= file <= 5 and 2 <= rank <= 5:
+                        value += 0.2
+                
+                # Kings: prefer protected corners in early/midgame
+                elif piece.piece_type == chess.KING:
+                    if board.fullmove_number <= 40:  # Early/midgame
+                        if (file <= 1 or file >= 6) and rank <= 1:
+                            value += 0.3
+                
+                return value if piece.color else -value
+            
+            # Calculate positional score
+            positional_score = 0.0
+            for square in chess.SQUARES:
+                piece = board.piece_at(square)
+                if piece:
+                    positional_score += piece_square_value(piece, square)
+            
+            # Mobility score (number of legal moves)
+            current_turn = board.turn
+            mobility_score = 0.0
+            
+            # White mobility
+            board.turn = chess.WHITE
+            white_moves = len(list(board.legal_moves))
+            
+            # Black mobility
+            board.turn = chess.BLACK
+            black_moves = len(list(board.legal_moves))
+            
+            # Restore original turn
+            board.turn = current_turn
+            
+            mobility_score = (white_moves - black_moves) * 0.01
+            
+            # Combine all factors
+            final_score = (
+                material_score * 1.0 +      # Material is most important
+                positional_score * 0.3 +    # Positional play
+                mobility_score * 0.2        # Mobility
+            ) * uncertainty_factor          # Reduce score if uncertain
+            
+            # If it's black's turn, negate the score since black wants to minimize
+            if not board.turn:
+                final_score = -final_score
+                
+            return final_score
+            
+        except Exception as e:
+            print(f"Error in evaluate_strategic: {e}")
+            # Return a neutral score if evaluation fails
+            return 0.0
 
     # -------------------------------------------------------------------------
     #   Additional or advanced features
