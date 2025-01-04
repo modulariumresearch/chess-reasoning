@@ -79,8 +79,10 @@ def main():
         pgn_paths=pgn_files,
         max_positions=args.max_positions,
         parse_comments=True,
-        auto_concept_labels=False,  # or True, if you have a concept_detector
-        concept_detector=None
+        auto_concept_labels=False,
+        concept_detector=None,
+        parallel=True,         # USE PARALLEL LOADING
+        max_workers=16         # number of processes
     )
     samples = dataset.samples
     logger.info(f"Total positions loaded: {len(samples)}")

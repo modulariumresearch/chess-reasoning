@@ -9,6 +9,9 @@ from typing import Optional, List, Tuple, Dict, Any, Union
 import torch
 from torch.utils.data import Dataset
 
+import concurrent.futures
+from functools import partial
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,14 +25,13 @@ class PGNGameInfo:
 
     def __init__(self):
         self.headers: Dict[str, str] = {}
-        # moves: list of (fen, move, comment, concept_labels)
         self.moves: List[Tuple[str, chess.Move, str, Dict[str, int]]] = []
 
 
 class ChessPositionsDataset(Dataset):
     """
-    A PyTorch Dataset that holds chess positions (FEN) + a target move + 
-    optional text annotation or concept labels. 
+    A PyTorch Dataset that holds chess positions (FEN) + a target move +
+    optional text annotation or concept labels.
     This is designed to be used for model training (e.g., concept learning, language explanation, etc.).
 
     Typically, you would:
@@ -64,7 +66,7 @@ class ChessPositionsDataset(Dataset):
 
 
 def parse_pgn_file(
-    pgn_path: str, 
+    pgn_path: str,
     parse_comments: bool = True,
     auto_concept_labels: bool = False,
     concept_detector: Optional[Any] = None
@@ -78,7 +80,7 @@ def parse_pgn_file(
     Args:
         pgn_path (str): path to the .pgn file
         parse_comments (bool): whether to parse textual comments from the PGN
-        auto_concept_labels (bool): if True, we attempt to automatically detect concepts 
+        auto_concept_labels (bool): if True, we attempt to automatically detect concepts
                                     for each position using concept_detector
         concept_detector: an object with a 'detect_concepts(board)' method that returns {concept: score}.
                           If omitted, concept_labels remain empty.
@@ -127,9 +129,7 @@ def parse_pgn_file(
                     for c_name, score_val in scores.items():
                         concept_labels[c_name] = 1 if score_val > 0.5 else 0
 
-                game_info.moves.append(
-                    (fen_before, move, comment, concept_labels)
-                )
+                game_info.moves.append((fen_before, move, comment, concept_labels))
                 board.push(move)
                 node = next_node
 
@@ -146,7 +146,8 @@ def load_multiple_pgns(
     concept_detector: Optional[Any] = None
 ) -> List[PGNGameInfo]:
     """
-    Load multiple .pgn files and aggregate the resulting PGNGameInfo objects.
+    Single-thread approach: Load multiple .pgn files sequentially
+    and aggregate the resulting PGNGameInfo objects.
 
     Args:
         pgn_paths: list of PGN file paths
@@ -160,7 +161,7 @@ def load_multiple_pgns(
     all_games: List[PGNGameInfo] = []
     for path in pgn_paths:
         file_games = parse_pgn_file(
-            path, 
+            pgn_path=path,
             parse_comments=parse_comments,
             auto_concept_labels=auto_concept_labels,
             concept_detector=concept_detector
@@ -169,33 +170,95 @@ def load_multiple_pgns(
     return all_games
 
 
+def load_multiple_pgns_parallel(
+    pgn_paths: List[str],
+    parse_comments: bool = True,
+    auto_concept_labels: bool = False,
+    concept_detector: Optional[Any] = None,
+    max_workers: int = 16
+) -> List[PGNGameInfo]:
+    """
+    Parallel approach: parse each PGN file in a separate process, using concurrent.futures.
+    This can speed up loading on multi-core systems.
+
+    Args:
+        pgn_paths: list of PGN file paths
+        parse_comments: parse textual comments
+        auto_concept_labels: whether to run concept detection
+        concept_detector: your ConceptLearner or similar
+        max_workers: number of parallel processes
+
+    Returns:
+        a single combined list of PGNGameInfo
+    """
+    logger.info(f"Parallel loading of {len(pgn_paths)} PGN files with up to {max_workers} workers...")
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    # Prepare partial function so parse_pgn_file can see the extra args
+    parse_func = partial(
+        parse_pgn_file,
+        parse_comments=parse_comments,
+        auto_concept_labels=auto_concept_labels,
+        concept_detector=concept_detector
+    )
+
+    all_games: List[PGNGameInfo] = []
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(parse_func, path): path for path in pgn_paths}
+        for fut in as_completed(futures):
+            path = futures[fut]
+            try:
+                result = fut.result()
+                all_games.extend(result)
+            except Exception as e:
+                logger.error(f"Failed to parse {path} due to: {e}")
+
+    logger.info(f"Parallel parse complete. Total PGNGameInfo objects: {len(all_games)}")
+    return all_games
+
+
 def create_chess_dataset_from_pgns(
     pgn_paths: List[str],
     max_positions: Optional[int] = None,
     parse_comments: bool = True,
     auto_concept_labels: bool = False,
-    concept_detector: Optional[Any] = None
+    concept_detector: Optional[Any] = None,
+    parallel: bool = False,       # <-- new param to enable parallel
+    max_workers: int = 16
 ) -> ChessPositionsDataset:
     """
-    High-level utility to parse multiple PGNs and directly produce a 
+    High-level utility to parse multiple PGNs and directly produce a
     ChessPositionsDataset for training or evaluation.
+
+    By default, we do *not* parse in parallel. If you want parallel,
+    call with: parallel=True, max_workers=16, etc.
 
     Returns:
         ChessPositionsDataset
     """
-    games_info = load_multiple_pgns(
-        pgn_paths=pgn_paths,
-        parse_comments=parse_comments,
-        auto_concept_labels=auto_concept_labels,
-        concept_detector=concept_detector
-    )
+    if parallel:
+        games_info = load_multiple_pgns_parallel(
+            pgn_paths=pgn_paths,
+            parse_comments=parse_comments,
+            auto_concept_labels=auto_concept_labels,
+            concept_detector=concept_detector,
+            max_workers=max_workers
+        )
+    else:
+        games_info = load_multiple_pgns(
+            pgn_paths=pgn_paths,
+            parse_comments=parse_comments,
+            auto_concept_labels=auto_concept_labels,
+            concept_detector=concept_detector
+        )
+
     dataset = ChessPositionsDataset(games_info, max_positions=max_positions)
     return dataset
 
 
 def annotation_from_comment(comment: str) -> Dict[str, Any]:
     """
-    (Optional) Example function to parse a PGN comment and extract 
+    (Optional) Example function to parse a PGN comment and extract
     special annotations, e.g. "Concept:fork" or "Eval:+1.2" from the text.
 
     This is fully user-defined. For demonstration, we might detect lines like:
@@ -222,7 +285,7 @@ def annotation_from_comment(comment: str) -> Dict[str, Any]:
         eval_score = float(eval_match.group(1))
         result["eval_score"] = eval_score
 
-    # Example for text explanation: "[Text: ...]"
+    # Example for text explanation: "[Text:\s*(.*?)]"
     text_match = re.search(r"\[Text:\s*(.*?)\]", comment)
     if text_match:
         explanation_str = text_match.group(1)
@@ -233,10 +296,10 @@ def annotation_from_comment(comment: str) -> Dict[str, Any]:
 
 def collate_chess_batch(batch: List[Tuple[chess.Board, chess.Move, str, Dict[str, int]]]) -> Dict[str, Any]:
     """
-    A custom collate function for a DataLoader that yields 
+    A custom collate function for a DataLoader that yields
     (board, move, comment, concept_labels) from ChessPositionsDataset.
 
-    This function will gather them into a dictionary of lists/tensors 
+    This function will gather them into a dictionary of lists/tensors
     for easier consumption by a training loop.
 
     Example usage:
@@ -253,7 +316,6 @@ def collate_chess_batch(batch: List[Tuple[chess.Board, chess.Move, str, Dict[str
         comments.append(comment)
         concept_labels_list.append(concept_labels)
 
-    # Return a dictionary
     return {
         "boards": boards,                       # List[chess.Board]
         "moves": moves,                         # List[chess.Move]
