@@ -1,4 +1,4 @@
-# gflownet.py
+# src/reasoning/gflownet.py
 
 import chess
 import torch

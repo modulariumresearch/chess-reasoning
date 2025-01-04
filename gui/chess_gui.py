@@ -52,85 +52,69 @@ class ReasoningDisplay:
         self.small_font = small_font
         self.reasoning_text = []
         self.evaluation = 0.0
+        self.ai_move_explanation = ""
 
-    def update(self, knowledge: Dict[str, torch.Tensor], score: float):
+    def update(self, knowledge: Dict[str, torch.Tensor], score: float, status: str):
         """Update reasoning text from the model knowledge and final score."""
         self.reasoning_text = []
         self.evaluation = score
 
-        # Material balance
-        if 'material_balance' in knowledge:
-            material = float(knowledge['material_balance'])
-            self.reasoning_text.append(f"Material Balance: {material:+.2f}")
+        # Add AI's explanation if available
+        if hasattr(self, 'ai_move_explanation') and self.ai_move_explanation:
+            self.reasoning_text.append(self.ai_move_explanation)
+            self.reasoning_text.append("")
 
-        # King safety
-        if 'king_safety' in knowledge:
-            safety = knowledge['king_safety']
-            w_safety = float(safety[0])
-            b_safety = float(safety[1])
-            self.reasoning_text.append(f"King Safety:")
-            self.reasoning_text.append(f"  White: {w_safety:.2f}")
-            self.reasoning_text.append(f"  Black: {b_safety:.2f}")
-
-        # Mobility
-        if 'mobility' in knowledge:
-            mobility = knowledge['mobility']
-            w_mob = float(mobility[0])
-            b_mob = float(mobility[1])
-            self.reasoning_text.append(f"Piece Mobility:")
-            self.reasoning_text.append(f"  White: {w_mob:.2f}")
-            self.reasoning_text.append(f"  Black: {b_mob:.2f}")
-
-        # Pawn structure
-        if 'pawn_structure' in knowledge:
-            pawns = knowledge['pawn_structure']
-            w_pawns = float(pawns[0])
-            b_pawns = float(pawns[1])
-            self.reasoning_text.append(f"Pawn Structure:")
-            self.reasoning_text.append(f"  White: {w_pawns:+.2f}")
-            self.reasoning_text.append(f"  Black: {b_pawns:+.2f}")
-
-        # Model uncertainty
-        if 'embedding_uncertainty' in knowledge:
-            uncertainty = float(knowledge['embedding_uncertainty'])
-            confidence = 1.0 - min(uncertainty, 1.0)
-            self.reasoning_text.append(f"Confidence: {confidence:.1%}")
+        # Add status
+        self.reasoning_text.append(status)
 
     def draw(self, surface: pygame.Surface, x: int, y: int, width: int, height: int):
         """Draw the reasoning panel, including an evaluation bar."""
-        # Draw title
-        title = self.font.render("AI Reasoning", True, TEXT_COLOR)
-        surface.blit(title, (x + 20, y + 20))
-
+        # Draw background
+        pygame.draw.rect(surface, RIGHT_PANEL_BG, (x, y, width, height))
+        
         # Draw evaluation bar
-        bar_height = 200
+        bar_height = 100
         bar_width = 30
         bar_x = x + width - bar_width - 20
-        bar_y = y + 60
-
-        # Bar background
+        bar_y = y + 20
+        
+        # Background
         pygame.draw.rect(surface, EVAL_BAR_BG, (bar_x, bar_y, bar_width, bar_height))
-
-        # Score in [-1..1], 0 => middle
-        eval_normal = max(-1.0, min(1.0, self.evaluation))
-        fill_height = int(bar_height * (0.5 - eval_normal / 2.0))
-
-        # Fill bar
+        
+        # Foreground (black's eval)
+        eval_height = int((0.5 - self.evaluation/2) * bar_height)
+        eval_height = max(0, min(bar_height, eval_height))  # Clamp
         pygame.draw.rect(surface, EVAL_BAR_FG, 
-                        (bar_x, bar_y + fill_height, bar_width, bar_height - fill_height))
-
-        # Draw reasoning text
+                        (bar_x, bar_y, bar_width, eval_height))
+        
+        # Draw text
         text_x = x + 20
-        text_y = y + 60
+        text_y = y + 20
         line_height = 25
-
-        for i, text in enumerate(self.reasoning_text):
-            color = TEXT_COLOR
-            if text.startswith("  "):  # Indented items
-                rendered = self.small_font.render(text, True, color)
-            else:  # Headers
-                rendered = self.font.render(text, True, color)
-            surface.blit(rendered, (text_x, text_y + i * line_height))
+        
+        # Draw each line of text
+        for line in self.reasoning_text:
+            # Word wrap if line is too long
+            if not line:  # Skip empty lines
+                text_y += line_height
+                continue
+                
+            words = line.split()
+            current_line = words[0]
+            for word in words[1:]:
+                test_line = current_line + " " + word
+                test_text = self.font.render(test_line, True, TEXT_COLOR)
+                if test_text.get_width() <= width - 60:
+                    current_line = test_line
+                else:
+                    text = self.font.render(current_line, True, TEXT_COLOR)
+                    surface.blit(text, (text_x, text_y))
+                    text_y += line_height
+                    current_line = word
+            
+            text = self.font.render(current_line, True, TEXT_COLOR)
+            surface.blit(text, (text_x, text_y))
+            text_y += line_height
 
 
 class ChessGUI:
@@ -162,9 +146,9 @@ class ChessGUI:
 
         # Model & reasoning
         self.model = ChessModel()
-        self._load_model()
         self.reasoning = ReasoningDisplay(self.font, self.font_small)
         self.status = "Your turn (White)"
+        self._load_model()  # Load model after creating reasoning object
 
         # Thread-related
         self.ai_thread: Optional[threading.Thread] = None
@@ -232,6 +216,10 @@ class ChessGUI:
                 
                 self.model.eval()
                 print("Model set to eval mode")
+                
+                # Initialize reasoning display
+                knowledge = self.model.world_model.evaluate_position(self.board)
+                self.reasoning.update(knowledge, 0.0, self.status)
             except Exception as e:
                 print(f"Error loading model: {str(e)}")
                 print(f"Error type: {type(e)}")
@@ -241,6 +229,9 @@ class ChessGUI:
         else:
             print(f"No checkpoint found at {os.path.abspath(cpath)}")
             print("Using untrained model.")
+            # Initialize reasoning display with untrained model
+            knowledge = self.model.world_model.evaluate_position(self.board)
+            self.reasoning.update(knowledge, 0.0, self.status)
 
     def draw_board(self):
         """Render board, pieces, right panel, etc."""
@@ -286,10 +277,6 @@ class ChessGUI:
         # Right panel
         rp_rect = pygame.Rect(RIGHT_PANEL_X, 0, RIGHT_PANEL_WIDTH, RIGHT_PANEL_HEIGHT)
         pygame.draw.rect(self.screen, RIGHT_PANEL_BG, rp_rect)
-
-        # Status
-        status_render = self.font.render(f"Status: {self.status}", True, TEXT_COLOR)
-        self.screen.blit(status_render, (RIGHT_PANEL_X + 20, 20))
 
         # Reasoning
         self.reasoning.draw(
@@ -512,19 +499,30 @@ class ChessGUI:
         try:
             # Only compute move if game is not over
             if not self.board.is_game_over():
+                # Get the move and score
                 move, score = self.model.get_move(self.board)
                 self.ai_move_result = move
                 self.ai_move_score = score
-                self.ai_move_explanation = "Move chosen based on strategic evaluation"
+                
+                # Get concept scores
+                concept_scores = self.model.concept_learner.detect_concepts(self.board)
+                
+                # Generate explanation using the language explainer
+                explanation = self.model.language_explainer.explain_move(
+                    self.board,
+                    move,
+                    concept_scores=concept_scores
+                )
+                self.ai_move_explanation = explanation
             else:
                 self.ai_move_result = None
-                self.ai_move_score = 0.0
-                self.ai_move_explanation = "Game is over"
+                self.ai_move_score = 0
+                self.ai_move_explanation = None
         except Exception as e:
             print(f"Error in AI worker: {e}")
             self.ai_move_result = None
-            self.ai_move_score = 0.0
-            self.ai_move_explanation = f"Error occurred: {str(e)}"
+            self.ai_move_score = 0
+            self.ai_move_explanation = None
 
     def complete_ai_move(self):
         """
@@ -533,12 +531,15 @@ class ChessGUI:
         """
         if self.ai_move_result and self.ai_move_result in self.board.legal_moves:
             knowledge = self.model.world_model.evaluate_position(self.board)
-            self.reasoning.update(knowledge, self.ai_move_score)
             san = self.board.san(self.ai_move_result)  # Get SAN before making the move
-            self.board.push(self.ai_move_result)
+            self.status = f"AI moved {san}"
             
-            # Always display the explanation
-            self.status = f"AI moved {san}\n{self.ai_move_explanation}"
+            # Update reasoning with AI's explanation
+            self.reasoning.ai_move_explanation = self.ai_move_explanation
+            self.reasoning.update(knowledge, self.ai_move_score, self.status)
+            
+            # Make the move
+            self.board.push(self.ai_move_result)
             
             self.check_game_end()
             if not self.board.is_game_over():
@@ -549,8 +550,8 @@ class ChessGUI:
             if legals:
                 m = random.choice(legals)
                 san = self.board.san(m)  # Get SAN before making the move
-                self.board.push(m)
                 self.status = f"AI moved randomly {san}\nReason: Had to make a random move"
+                self.board.push(m)
                 self.check_game_end()
             else:
                 self.status = "Game Over!"
