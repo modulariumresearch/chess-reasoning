@@ -1,5 +1,3 @@
-# scripts/train.py
-
 #!/usr/bin/env python3
 
 import os
@@ -14,10 +12,11 @@ import torch
 from torch.optim import AdamW
 from torch.utils.data import random_split, DataLoader
 
+from tqdm import tqdm  # For the progress bar
+
 from src.integrated_model.chess_model import ChessModel
 from src.utils.data_utils import create_chess_dataset_from_pgns, collate_chess_batch
 from src.utils.evaluation_utils import evaluate_concept_detection
-
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +30,10 @@ def save_checkpoint(
     global_step: int,
     checkpoint_dir: str
 ):
+    """
+    Saves model submodules (which are PyTorch nn.Modules) as well as optimizer states.
+    We skip saving the strategic_planner, since it's not an nn.Module.
+    """
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(
         checkpoint_dir,
@@ -42,12 +45,15 @@ def save_checkpoint(
         "model_world_state": model.world_model.state_dict(),
         "model_inference_state": model.inference_machine.state_dict(),
         "model_concept_state": model.concept_learner.state_dict(),
-        "model_planner_state": model.strategic_planner.state_dict() if model.strategic_planner else None,
+        # "model_planner_state": model.strategic_planner.state_dict() if model.strategic_planner else None,
+        # ^ commented out because StrategicPlanner is not an nn.Module
         "model_language_state": model.language_explainer.model.state_dict(),
+
         "inference_optimizer_state": inference_optimizer.state_dict(),
         "concept_optimizer_state": concept_optimizer.state_dict(),
         "language_optimizer_state": language_optimizer.state_dict()
     }
+
     torch.save(checkpoint_data, checkpoint_path)
     logger.info(f"Saved checkpoint to {checkpoint_path}")
 
@@ -59,6 +65,9 @@ def load_checkpoint(
     concept_optimizer: torch.optim.Optimizer,
     language_optimizer: torch.optim.Optimizer
 ) -> (int, int):
+    """
+    Loads submodules that are nn.Modules, skipping strategic_planner.
+    """
     if not os.path.isfile(checkpoint_path):
         logger.error(f"Checkpoint not found: {checkpoint_path}")
         sys.exit(1)
@@ -69,8 +78,10 @@ def load_checkpoint(
     model.world_model.load_state_dict(checkpoint["model_world_state"])
     model.inference_machine.load_state_dict(checkpoint["model_inference_state"])
     model.concept_learner.load_state_dict(checkpoint["model_concept_state"])
-    if model.strategic_planner and checkpoint["model_planner_state"] is not None:
-        model.strategic_planner.load_state_dict(checkpoint["model_planner_state"])
+    # if "model_planner_state" in checkpoint and checkpoint["model_planner_state"] is not None:
+    #     model.strategic_planner.load_state_dict(checkpoint["model_planner_state"])
+    # ^ commented out because strategic_planner is not an nn.Module
+
     model.language_explainer.model.load_state_dict(checkpoint["model_language_state"])
 
     inference_optimizer.load_state_dict(checkpoint["inference_optimizer_state"])
@@ -88,6 +99,9 @@ def evaluate_concepts_on_dev(
     dev_loader: DataLoader,
     max_batches: int = 50
 ) -> Dict[str, float]:
+    """
+    Evaluate concept detection on dev set (concept_learner).
+    """
     model.concept_learner.eval()
     boards_all = []
     concept_labels_all = []
@@ -119,6 +133,9 @@ def evaluate_language_model_perplexity(
     dev_loader: DataLoader,
     max_batches: int = 50
 ) -> float:
+    """
+    Evaluate language model perplexity on dev set.
+    """
     model.language_explainer.model.eval()
     total_loss = 0.0
     total_tokens = 0
@@ -135,11 +152,7 @@ def evaluate_language_model_perplexity(
             for board, move, comment in zip(boards, moves, comments):
                 fen = board.fen()
                 move_uci = move.uci() if move else "none"
-                prompt_text = (
-                    f"Position: {fen}\n"
-                    f"Move: {move_uci}\n"
-                    f"Explanation: "
-                )
+                prompt_text = f"Position: {fen}\nMove: {move_uci}\nExplanation: "
                 text = prompt_text + (comment if comment else "No explanation.")
 
                 enc = model.language_explainer.tokenizer(text, return_tensors="pt")
@@ -171,35 +184,34 @@ def main():
     parser.add_argument("--device", type=str, default=None,
                         help="Device: 'cpu', 'cuda', or 'mps'. If none, auto-detect.")
     parser.add_argument("--epochs", type=int, default=10,
-                        help="Number of epochs. Each epoch sees the entire train set for concept+inference.")
+                        help="Number of epochs.")
     parser.add_argument("--lr", type=float, default=1e-4,
-                        help="Learning rate for inference/concept modules.")
+                        help="Learning rate for inference/concept.")
     parser.add_argument("--lr_language", type=float, default=1e-5,
                         help="Learning rate for language model fine-tuning.")
     parser.add_argument("--batch_size", type=int, default=64,
-                        help="Mini-batch size for concept+inference (and partial LM).")
+                        help="Mini-batch size.")
     parser.add_argument("--accum_steps", type=int, default=1,
                         help="Gradient accumulation steps.")
-    parser.add_argument("--max_positions", type=int, default=None,
-                        help="If not None, limit total positions.")
+    parser.add_argument("--max_positions", type=int, default=10000,
+                        help="Limit total positions for quick testing.")
     parser.add_argument("--dev_split_ratio", type=float, default=0.1,
                         help="Fraction for dev set.")
     parser.add_argument("--save_dir", type=str, default="checkpoints",
-                        help="Where to save model checkpoints.")
+                        help="Directory for saving model checkpoints.")
     parser.add_argument("--save_every", type=int, default=1,
-                        help="Save a checkpoint after every N epochs.")
+                        help="Checkpoint saving frequency in epochs.")
     parser.add_argument("--resume_checkpoint", type=str, default=None,
                         help="Path to .pt checkpoint for resuming.")
     parser.add_argument("--max_epochs_finetune", type=int, default=1,
-                        help="Number of LM fine-tune epochs per partial batch.")
-    # NEW ARG:
+                        help="LM fine-tune epochs per partial batch.")
     parser.add_argument("--language_subsample", type=int, default=8,
-                        help="Number of examples from each batch used for language model fine-tuning.")
+                        help="Examples from each batch for language fine-tune.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
 
-    # Detect device
+    # 1) Detect device
     if args.device is None:
         if torch.backends.mps.is_available():
             device = torch.device("mps")
@@ -210,7 +222,7 @@ def main():
         device = torch.device(args.device)
     logger.info(f"Using device={device}")
 
-    # Gather PGNs
+    # 2) Gather PGNs
     data_dir = args.data_dir
     pgn_files = []
     if os.path.isdir(data_dir):
@@ -229,23 +241,23 @@ def main():
     logger.info("Creating ChessModel ...")
     model = ChessModel(device=device)
 
-    # Create optimizers
+    # 3) Create optimizers
     inference_optimizer = AdamW(model.inference_machine.parameters(), lr=args.lr)
     concept_optimizer = AdamW(model.concept_learner.parameters(), lr=args.lr)
     language_optimizer = AdamW(model.language_explainer.model.parameters(), lr=args.lr_language)
 
-    # Parse data
-    logger.info("Parsing all PGNs. This might be large, consider caching if repeated often.")
+    # 4) Parse data
+    logger.info(f"Parsing PGNs with max_positions={args.max_positions} for a quick subset.")
     dataset = create_chess_dataset_from_pgns(
         pgn_paths=pgn_files,
-        max_positions=args.max_positions,
+        max_positions=args.max_positions,  # limit the total positions
         parse_comments=True,
         auto_concept_labels=False,
         concept_detector=None
     )
-    logger.info(f"Total positions in dataset: {len(dataset)}")
+    logger.info(f"Total positions in dataset (subset): {len(dataset)}")
 
-    # Train/dev split
+    # 5) Train/dev split
     dev_size = int(len(dataset) * args.dev_split_ratio)
     train_size = len(dataset) - dev_size
     if train_size < 1:
@@ -268,7 +280,7 @@ def main():
         drop_last=False
     )
 
-    # Possibly resume
+    # 6) Possibly resume
     start_epoch = 0
     global_step = 0
     if args.resume_checkpoint:
@@ -284,9 +296,10 @@ def main():
     accum_steps = args.accum_steps
     language_subsample = args.language_subsample
 
-    logger.info(f"Starting training for {args.epochs} epochs. Each epoch sees all data for concept+inference.")
-    logger.info(f"For the language model, we only fine-tune on {language_subsample} items per mini-batch to reduce overhead.")
+    logger.info(f"Starting training for {args.epochs} epochs on subset of size {len(dataset)}.")
+    logger.info(f"Each epoch sees the entire train subset. LM fine-tunes on {language_subsample} items per batch.")
 
+    # 7) Training loop
     for epoch in range(start_epoch, args.epochs):
         logger.info(f"=== Epoch {epoch+1}/{args.epochs} ===")
         model.train()
@@ -296,13 +309,17 @@ def main():
         language_optimizer.zero_grad()
 
         accum_count = 0
-        for batch_idx, batch in enumerate(train_loader):
+
+        # Wrap train_loader in tqdm progress bar
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}", leave=True)
+
+        for batch_idx, batch in enumerate(train_pbar):
             boards = batch["boards"]
             moves = batch["moves"]
             comments = batch["comments"]
             concept_labels_list = batch["concept_labels"]
 
-            # 1) concept + inference: on ALL items
+            # concept + inference on all items
             for b, m, c, cl in zip(boards, moves, comments, concept_labels_list):
                 optimizer_dict = {
                     "inference": inference_optimizer,
@@ -316,16 +333,14 @@ def main():
                     explanation_text=None
                 )
 
-            # 2) language model: only partial subset of the batch
+            # partial subset for language model
             batch_size_actual = len(boards)
             if batch_size_actual <= language_subsample:
-                # If the batch is small, we just use them all
                 sample_indices = range(batch_size_actual)
             else:
-                # pick random 'language_subsample' from the batch
                 sample_indices = random.sample(range(batch_size_actual), language_subsample)
 
-            # add examples for those items
+            # add examples for LM
             for idx2 in sample_indices:
                 b = boards[idx2]
                 m = moves[idx2]
@@ -333,7 +348,7 @@ def main():
                 explanation_text = c if c else "No explanation."
                 model.language_explainer.add_explanation_example(b, m, explanation_text)
 
-            # do one mini fine-tune pass on that small subset
+            # do small LM fine-tune pass
             model.language_explainer.train_finetune(
                 optimizer=language_optimizer,
                 batch_size=len(sample_indices),
@@ -343,7 +358,6 @@ def main():
 
             accum_count += 1
             if accum_count >= accum_steps:
-                # step
                 inference_optimizer.step()
                 concept_optimizer.step()
                 language_optimizer.step()
@@ -355,7 +369,13 @@ def main():
                 accum_count = 0
                 global_step += 1
 
-        # leftover accum
+            # Optional progress bar updates
+            train_pbar.set_postfix({
+                "global_step": global_step,
+                "accum": accum_count
+            })
+
+        # leftover
         if accum_count > 0:
             inference_optimizer.step()
             concept_optimizer.step()
@@ -366,16 +386,14 @@ def main():
             language_optimizer.zero_grad()
             global_step += 1
 
-        # Validation
+        # 8) Validation
         model.eval()
         concept_metrics = evaluate_concepts_on_dev(model, dev_loader, max_batches=50)
-        from src.utils.evaluation_utils import evaluate_inference_accuracy  # optional
         dev_ppl = evaluate_language_model_perplexity(model, dev_loader, max_batches=50)
-
         logger.info(f"[Epoch {epoch+1}] Dev Concept Metrics: {concept_metrics}")
         logger.info(f"[Epoch {epoch+1}] Dev LM Perplexity: {dev_ppl:.4f}")
 
-        # Save checkpoint
+        # 9) Save checkpoint
         if (epoch + 1) % args.save_every == 0:
             save_checkpoint(
                 model,

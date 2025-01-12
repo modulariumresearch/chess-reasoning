@@ -1,3 +1,5 @@
+# gui/chess_gui.py
+
 #!/usr/bin/env python3
 
 import os
@@ -119,7 +121,7 @@ class ReasoningDisplay:
 
 class ChessGUI:
     """
-    A Chess GUI that loads a model from 'checkpoints/chess_model_epoch_1.pt',
+    A Chess GUI that loads a model from 'checkpoints/checkpoint_epoch10_step150.pt',
     runs AI moves in a background thread to prevent freezing.
     """
 
@@ -188,31 +190,41 @@ class ChessGUI:
                     self.pieces[f'{color}{piece}'] = surf
 
     def _load_model(self):
-        """Load from 'checkpoints/chess_model_epoch_1.pt' if found."""
-        cpath = "checkpoints/chess_model_epoch_1.pt"
+        """Load from 'checkpoints/checkpoint_epoch10_step150.pt' if found."""
+        cpath = "checkpoints/checkpoint_epoch10_step150.pt"
         if os.path.exists(cpath):
             try:
                 print(f"Loading checkpoint from {os.path.abspath(cpath)}")
-                checkpoint = torch.load(cpath)
+                checkpoint = torch.load(cpath, weights_only=True)  # Set weights_only=True to avoid pickle warning
                 print("Checkpoint loaded, keys:", list(checkpoint.keys()))
                 
-                # Extract world model weights, removing leading dots
-                world_model_dict = {k[11:].lstrip('.'): v for k, v in checkpoint.items() if k.startswith('world_model.')}
-                print("World model keys:", list(world_model_dict.keys()))
-                self.model.world_model.load_state_dict(world_model_dict)
-                print("World model loaded successfully")
+                # Load world model state
+                if 'model_world_state' in checkpoint:
+                    print("Loading world model state...")
+                    self.model.world_model.load_state_dict(checkpoint['model_world_state'])
+                    print("World model loaded successfully")
                 
-                # Extract inference machine weights, removing leading dots
-                inference_dict = {k[17:].lstrip('.'): v for k, v in checkpoint.items() if k.startswith('inference_machine.')}
-                print("Inference machine keys:", list(inference_dict.keys()))
-                self.model.inference_machine.load_state_dict(inference_dict)
-                print("Inference machine loaded successfully")
+                # Load inference machine state
+                if 'model_inference_state' in checkpoint:
+                    print("Loading inference machine state...")
+                    self.model.inference_machine.load_state_dict(checkpoint['model_inference_state'])
+                    print("Inference machine loaded successfully")
                 
-                # Extract concept learner weights, removing leading dots
-                concept_dict = {k[15:].lstrip('.'): v for k, v in checkpoint.items() if k.startswith('concept_learner.')}
-                print("Concept learner keys:", list(concept_dict.keys()))
-                self.model.concept_learner.load_state_dict(concept_dict)
-                print("Concept learner loaded successfully")
+                # Load concept learner state
+                if 'model_concept_state' in checkpoint:
+                    print("Loading concept learner state...")
+                    self.model.concept_learner.load_state_dict(checkpoint['model_concept_state'])
+                    print("Concept learner loaded successfully")
+                
+                # Load language model state if available
+                if 'model_language_state' in checkpoint and hasattr(self.model, 'language_explainer'):
+                    print("Loading language model state...")
+                    # For LanguageExplainer, we need to load the state into its underlying HuggingFace model
+                    if hasattr(self.model.language_explainer, 'model'):
+                        self.model.language_explainer.model.load_state_dict(checkpoint['model_language_state'])
+                        print("Language model loaded successfully")
+                    else:
+                        print("Language explainer exists but has no model attribute")
                 
                 self.model.eval()
                 print("Model set to eval mode")
@@ -560,7 +572,7 @@ class ChessGUI:
         self.ai_move_explanation = None
 
 def main():
-    print("Starting Chess GUI with async AI (chess_model_epoch_1.pt).")
+    print("Starting Chess GUI with async AI (checkpoint_epoch10_step150.pt).")
     gui = ChessGUI()
     gui.run()
 
